@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 pub const MAX_RECORDING_SECONDS: u64 = 600;
 
 pub(crate) const MAX_AUDIO_BYTES: usize = 25 * 1024 * 1024;
-pub(crate) const MODELS: [&str; 3] = ["gpt-4o-mini-transcribe", "gpt-4o-transcribe", "whisper-1"];
+pub const DEFAULT_MODEL: &str = "gpt-transcribe";
 
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 #[serde(default)]
@@ -33,7 +33,7 @@ impl Default for Settings {
                 "Super+R"
             }
             .to_owned(),
-            model: MODELS[0].to_owned(),
+            model: DEFAULT_MODEL.to_owned(),
             input_device: None,
         }
     }
@@ -56,12 +56,18 @@ impl Settings {
     }
 }
 
+// Format validation only; OpenAI decides availability and endpoint compatibility.
 pub(crate) fn validate_model(model: &str) -> Result<(), String> {
-    if MODELS.contains(&model) {
-        Ok(())
-    } else {
-        Err("Выберите поддерживаемую модель распознавания в настройках.".into())
+    let bytes = model.as_bytes();
+    if !(1..=128).contains(&bytes.len())
+        || !bytes[0].is_ascii_alphanumeric()
+        || !bytes[1..]
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b':'))
+    {
+        return Err("Некорректный идентификатор модели. Используйте от 1 до 128 ASCII-символов: первая буква или цифра, далее буквы, цифры и . _ - : без пробелов.".into());
     }
+    Ok(())
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -119,9 +125,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_settings_and_allowed_models() {
+    fn default_settings_and_valid_model_ids() {
         let mut settings = Settings::default();
-        assert_eq!(settings.model, "gpt-4o-mini-transcribe");
+        assert_eq!(DEFAULT_MODEL, "gpt-transcribe");
+        assert_eq!(settings.model, DEFAULT_MODEL);
         assert_eq!(settings.input_device, None);
         assert_eq!(
             settings.shortcut,
@@ -131,11 +138,65 @@ mod tests {
                 "Super+R"
             }
         );
-        for model in MODELS {
+        for model in [
+            "gpt-transcribe",
+            "gpt-4o-mini-transcribe",
+            "gpt-4o-transcribe",
+            "whisper-1",
+            "gpt-4o-mini-transcribe-2025-12-15",
+            "gpt-4o-transcribe-diarize",
+            "gpt-4o-transcribe-diarize-2026-01-01",
+            "future-ASR_v2.1:stable",
+            "unknown",
+            "A",
+            "7",
+        ] {
             settings.model = model.into();
-            assert!(settings.validate().is_ok());
+            assert!(settings.validate().is_ok(), "{model}");
         }
-        settings.model = "unknown".into();
+        settings.model = "a".repeat(128);
+        assert!(settings.validate().is_ok());
+    }
+
+    #[test]
+    fn rejects_malformed_model_ids_without_echoing_them() {
+        for model in [
+            "",
+            " ",
+            " gpt-transcribe",
+            "gpt-transcribe ",
+            "gpt transcribe",
+            "gpt/transcribe",
+            "gpt\\transcribe",
+            "gpt\ntranscribe",
+            "gpt\rtranscribe",
+            "gpt\ttranscribe",
+            "gpt\0transcribe",
+            "gpt\u{7f}transcribe",
+            "модель",
+            "gpt-é",
+            ".model",
+            "_model",
+            "-model",
+            ":model",
+            "model?",
+            "model%",
+            "model\"",
+        ] {
+            let settings = Settings {
+                model: model.into(),
+                ..Settings::default()
+            };
+            let error = settings.validate().unwrap_err();
+            assert!(error.contains("идентификатор модели"));
+            if !model.trim().is_empty() {
+                assert!(!error.contains(model));
+            }
+        }
+        let settings = Settings {
+            model: "a".repeat(129),
+            ..Settings::default()
+        };
         assert!(settings.validate().is_err());
     }
 

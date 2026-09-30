@@ -20,6 +20,8 @@ export interface Snapshot {
   last_error: string | null;
   has_api_key: boolean;
   hotkey_available: boolean;
+  hotkey_mode: 'native' | 'system';
+  hotkey_command: string | null;
   hotkey_message: string | null;
   recording_seconds: number;
 }

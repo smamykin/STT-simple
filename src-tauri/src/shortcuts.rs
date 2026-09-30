@@ -11,8 +11,8 @@ pub fn validate(value: &str) -> Result<Shortcut, String> {
     })
 }
 
-pub fn wayland_message() -> String {
-    let command = std::env::current_exe()
+pub fn wayland_command() -> String {
+    std::env::current_exe()
         .map(|path| {
             format!(
                 "\"{}\" --toggle",
@@ -21,15 +21,29 @@ pub fn wayland_message() -> String {
                     .replace('"', "\\\"")
             )
         })
-        .unwrap_or_else(|_| "stt-simple --toggle".into());
-    format!("На Wayland назначьте выбранное сочетание в настройках GNOME: Клавиатура → Пользовательские комбинации. Команда: {command}. Изменение сочетания в приложении не меняет системную настройку.")
+        .unwrap_or_else(|_| "stt-simple --toggle".into())
+}
+
+fn verify_system(shortcut: &str) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        crate::gnome_shortcuts::verify(shortcut, &wayland_command())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = shortcut;
+        Err("Автоматическая настройка GNOME поддерживается только на Linux.".into())
+    }
 }
 
 pub fn initialize(app: &AppHandle) {
     let runtime = app.state::<Runtime>();
     let settings = runtime.snapshot().settings;
     let (available, message) = if clipboard::is_wayland() {
-        (false, Some(wayland_message()))
+        match verify_system(&settings.shortcut) {
+            Ok(()) => (true, None),
+            Err(error) => (false, Some(error)),
+        }
     } else {
         match validate(&settings.shortcut).and_then(|shortcut| {
             app.global_shortcut().register(shortcut).map_err(|_| "Не удалось зарегистрировать сочетание: оно может быть занято или запрещено системой.".to_owned())
@@ -44,10 +58,18 @@ pub fn initialize(app: &AppHandle) {
 }
 
 // Register the replacement before releasing the old shortcut so conflicts do not break it.
-pub fn replace(app: &AppHandle, old: &Settings, new: &Settings) -> Result<(), String> {
+pub async fn replace(app: &AppHandle, old: &Settings, new: &Settings) -> Result<(), String> {
     let new_shortcut = validate(&new.shortcut)?;
     if clipboard::is_wayland() {
-        return Ok(());
+        #[cfg(target_os = "linux")]
+        {
+            let shortcut = new.shortcut.clone();
+            let command = wayland_command();
+            return crate::blocking(move || crate::gnome_shortcuts::apply(&shortcut, &command))
+                .await;
+        }
+        #[cfg(not(target_os = "linux"))]
+        return Err("Автоматическая настройка GNOME поддерживается только на Linux.".into());
     }
     let manager = app.global_shortcut();
     let old_shortcut = validate(&old.shortcut)

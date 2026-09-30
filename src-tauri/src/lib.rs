@@ -1,11 +1,13 @@
 mod clipboard;
 mod credentials;
+#[cfg(target_os = "linux")]
+mod gnome_shortcuts;
 mod recorder;
 mod shortcuts;
 mod state;
 mod tray;
 
-use state::{Data, Phase, Runtime, Session, Snapshot};
+use state::{Data, HotkeyMode, Phase, Runtime, Session, Snapshot};
 use std::sync::Mutex;
 use std::time::Duration;
 use stt_core::{load_data, save_data, OpenAiClient, Settings, Statistics, StoredData};
@@ -65,7 +67,7 @@ async fn save_settings(app: AppHandle, mut settings: Settings) -> Result<Snapsho
     };
     let path = runtime.storage_path.clone();
     let outcome = blocking(move || save_data(&path, &candidate)).await?;
-    if let Err(error) = shortcuts::replace(&app, &old.settings, &settings) {
+    if let Err(error) = shortcuts::replace(&app, &old.settings, &settings).await {
         let path = runtime.storage_path.clone();
         let rollback = blocking(move || save_data(&path, &old)).await;
         return Err(match rollback {
@@ -79,12 +81,8 @@ async fn save_settings(app: AppHandle, mut settings: Settings) -> Result<Snapsho
     {
         let mut data = runtime.data.lock().expect("application state poisoned");
         data.stored.settings = settings;
-        data.hotkey_available = !clipboard::is_wayland();
-        data.hotkey_message = if clipboard::is_wayland() {
-            Some(shortcuts::wayland_message())
-        } else {
-            None
-        };
+        data.hotkey_available = true;
+        data.hotkey_message = None;
         data.last_error = outcome.durability_warning;
     }
     *runtime
@@ -532,7 +530,7 @@ pub fn run() {
         );
     }
     builder
-        .setup(|app| {
+        .setup(move |app| {
             let handle = app.handle().clone();
             let storage_path = app.path().app_data_dir()?.join("settings.json");
             let (stored, storage_error) = match load_data(&storage_path) {
@@ -551,7 +549,9 @@ pub fn run() {
             app.manage(Runtime {
                 data: Mutex::new(Data { stored, phase: Phase::Idle, session: None, next_session_id: 0,
                     last_transcript: None, last_error, has_api_key,
-                    hotkey_available: false, hotkey_message: None }),
+                    hotkey_available: false, hotkey_message: None,
+                    hotkey_mode: if wayland { HotkeyMode::System } else { HotkeyMode::Native },
+                    hotkey_command: if wayland { Some(shortcuts::wayland_command()) } else { None } }),
                 control: tokio::sync::Mutex::new(()),
                 clipboard: tokio::sync::Mutex::new(()),
                 shortcut_pressed: Mutex::new(false),

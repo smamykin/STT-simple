@@ -213,6 +213,26 @@ mod tests {
     }
 
     #[test]
+    fn explicitly_persisted_models_are_preserved_when_defaults_change() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("settings.json");
+        for model in [
+            "gpt-4o-mini-transcribe",
+            "gpt-4o-transcribe",
+            "whisper-1",
+            "gpt-4o-mini-transcribe-2025-12-15",
+            "future-ASR_v2.1:stable",
+        ] {
+            let json = serde_json::json!({ "settings": { "model": model } });
+            fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+            let data = load_data(&path).unwrap();
+            assert_eq!(data.settings.model, model);
+            save_data(&path, &data).unwrap();
+            assert_eq!(load_data(&path).unwrap().settings.model, model);
+        }
+    }
+
+    #[test]
     fn corruption_and_invalid_values_are_not_silently_reset() {
         let directory = TestDirectory::new();
         let path = directory.0.join("settings.json");
@@ -220,7 +240,8 @@ mod tests {
             "",
             "{broken",
             "null",
-            r#"{"settings": {"model": "invalid"}}"#,
+            r#"{"settings": {"model": "invalid/model"}}"#,
+            r#"{"settings": {"model": ""}}"#,
             r#"{"statistics": {"total_recording_seconds": -1}}"#,
             r#"{"statistics": {"recordings": "two"}}"#,
         ] {

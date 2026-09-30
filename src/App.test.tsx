@@ -6,6 +6,7 @@ import App from './App';
 import { useAppState } from './useAppState';
 import { deferred, makeSnapshot } from './testFixtures';
 import type { Snapshot } from './types';
+import { MODELS } from './utils';
 
 const backend = vi.hoisted(() => ({
   getSnapshot: vi.fn(),
@@ -70,7 +71,9 @@ describe('Russian dictation interface', () => {
     expect(screen.getByText('01:05')).toBeTruthy();
     expect(screen.getByText('01:01:01')).toBeTruthy();
     expect(screen.getByRole('option', { name: 'USB микрофон — по умолчанию' })).toBeTruthy();
-    expect(screen.getAllByRole('option').filter((option) => option.parentElement?.id === 'model')).toHaveLength(3);
+    expect(screen.getAllByRole('option').filter((option) => option.parentElement?.id === 'model')).toHaveLength(MODELS.length + 1);
+        expect(screen.getByRole('option', { name: 'GPT Transcribe — рекомендован OpenAI' })).toBeTruthy();
+        expect(screen.getByRole('option', { name: 'GPT-4o mini Transcribe — 2025-12-15' })).toBeTruthy();
   });
 
   it('requires an API key before enabling start', async () => {
@@ -217,15 +220,95 @@ describe('Russian dictation interface', () => {
     await screen.findByText(/Не удалось получить микрофоны: Нет доступа к устройствам/);
   });
 
-  it('explains manual Wayland shortcuts without claiming to register GNOME shortcuts', async () => {
+  it('offers applying a missing GNOME shortcut even when settings have not changed', async () => {
     vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (X11; Linux x86_64)');
-    await mount(makeSnapshot({ hotkey_available: false, hotkey_message: 'Wayland: используйте системное сочетание.' }));
-    expect(screen.getByText('stt-simple --toggle')).toBeTruthy();
-    expect(screen.getByText(/Рекомендуется указать абсолютный путь/)).toBeTruthy();
-    expect(screen.getByText(/сама по себе не регистрирует его в GNOME/)).toBeTruthy();
-    expect(screen.getByText('Wayland: используйте системное сочетание.')).toBeTruthy();
+    const command = '"/opt/STT Simple/stt-simple" --toggle';
+    await mount(makeSnapshot({ hotkey_available: false, hotkey_mode: 'system', hotkey_command: command,
+      hotkey_message: 'Системное сочетание отсутствует.' }));
+    expect(screen.getByText(command)).toBeTruthy();
+    expect(screen.getByText(/не настроено в GNOME/)).toBeTruthy();
+    expect(screen.queryByText(/недоступно, используйте кнопку/)).toBeNull();
+    expect(screen.queryByText(/не удалось зарегистрировать/)).toBeNull();
+    expect(screen.getByText(/Чужие сочетания не перезаписываются/)).toBeTruthy();
+    expect(screen.getByText('Системное сочетание отсутствует.')).toBeTruthy();
     expect(screen.getByText(/Для работы в фоне сверните окно/)).toBeTruthy();
     expect(screen.getByText(/В Linux закрытие окна тоже сворачивает его, а не скрывает в системный трей/)).toBeTruthy();
+    expect(screen.getByText(/Привязка проверяется при запуске и сохранении настроек/)).toBeTruthy();
+        const saved = makeSnapshot({ hotkey_available: true, hotkey_mode: 'system', hotkey_command: command });
+        backend.saveSettings.mockResolvedValue(saved);
+        backend.getSnapshot.mockResolvedValue(saved);
+        const save = screen.getByRole('button', { name: 'Сохранить настройки' });
+        expect(save).toHaveProperty('disabled', false);
+        fireEvent.click(save);
+        await screen.findByText('Настройки сохранены.');
+        expect(backend.saveSettings).toHaveBeenCalledWith(saved.settings);
+        expect(screen.getByText(/· настроено в GNOME/)).toBeTruthy();
+  });
+
+  it('does not show Wayland instructions on Linux with native shortcut registration', async () => {
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (X11; Linux x86_64)');
+    await mount(makeSnapshot({ hotkey_mode: 'native', hotkey_available: true }));
+    expect(screen.queryByRole('heading', { name: 'Системное сочетание клавиш' })).toBeNull();
+    expect(screen.queryByText(/настроено в GNOME/)).toBeNull();
+    expect(screen.getByText(/зарегистрировано/)).toBeTruthy();
+  });
+
+  it('keeps the saved GNOME status and settings when applying another shortcut fails', async () => {
+      const saved = makeSnapshot({ hotkey_mode: 'system', hotkey_available: true });
+      await mount(saved);
+      backend.saveSettings.mockRejectedValue('Сочетание уже назначено другому приложению.');
+      fireEvent.change(screen.getByLabelText('Сочетание клавиш'), { target: { value: 'Super+E' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Сохранить настройки' }));
+      await screen.findByText(/Не удалось сохранить настройки: Сочетание уже назначено/);
+      expect(screen.getByText(/· настроено в GNOME/)).toBeTruthy();
+      expect(screen.getByText('Super+R', { selector: '.shortcut-hint kbd' })).toBeTruthy();
+      expect(screen.getByLabelText('Сочетание клавиш')).toHaveProperty('value', 'Super+E');
+    });
+
+    it('disables system shortcut application while recording', async () => {
+      await mount(makeSnapshot({ phase: 'recording', hotkey_mode: 'system', hotkey_available: false }));
+      expect(screen.getByRole('button', { name: 'Сохранить настройки' }).matches(':disabled')).toBe(true);
+    });
+
+    it('distinguishes a native registration failure from the Wayland system mode', async () => {
+    await mount(makeSnapshot({ hotkey_mode: 'native', hotkey_available: false, hotkey_message: 'Сочетание занято.' }));
+    expect(screen.getByText(/не удалось зарегистрировать/)).toBeTruthy();
+    expect(screen.getByText('Сочетание занято.')).toBeTruthy();
+    expect(screen.queryByText(/Команда для этой сборки/)).toBeNull();
+  });
+
+  it('allows choosing the current recommended transcription model', async () => {
+    const settings = { ...makeSnapshot().settings, model: 'gpt-transcribe' };
+    await mount();
+    backend.saveSettings.mockResolvedValue(makeSnapshot({ settings }));
+    fireEvent.change(screen.getByLabelText('Модель'), { target: { value: 'gpt-transcribe' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Сохранить настройки' }));
+    await screen.findByText('Настройки сохранены.');
+    expect(backend.saveSettings).toHaveBeenCalledWith(settings);
+  });
+
+  it('allows a custom model ID not present in the suggestions', async () => {
+    const settings = { ...makeSnapshot().settings, model: 'gpt-transcribe-future-snapshot' };
+    await mount();
+    backend.saveSettings.mockResolvedValue(makeSnapshot({ settings }));
+    fireEvent.change(screen.getByLabelText('Модель'), { target: { value: '__custom__' } });
+    fireEvent.change(screen.getByLabelText('ID модели OpenAI'), { target: { value: settings.model } });
+    fireEvent.click(screen.getByRole('button', { name: 'Сохранить настройки' }));
+    await screen.findByText('Настройки сохранены.');
+    expect(backend.saveSettings).toHaveBeenCalledWith(settings);
+    expect(screen.getByLabelText('ID модели OpenAI')).toHaveProperty('value', settings.model);
+  });
+
+  it('preserves an existing custom model while changing another setting', async () => {
+    const saved = { ...makeSnapshot().settings, model: 'custom-transcription-model' };
+    await mount(makeSnapshot({ settings: saved }));
+    expect(screen.getByLabelText('ID модели OpenAI')).toHaveProperty('value', saved.model);
+    const settings = { ...saved, shortcut: 'Control+Alt+R' };
+    backend.saveSettings.mockResolvedValue(makeSnapshot({ settings }));
+    fireEvent.change(screen.getByLabelText('Сочетание клавиш'), { target: { value: settings.shortcut } });
+    fireEvent.click(screen.getByRole('button', { name: 'Сохранить настройки' }));
+    await screen.findByText('Настройки сохранены.');
+    expect(backend.saveSettings).toHaveBeenCalledWith(settings);
   });
 });
 

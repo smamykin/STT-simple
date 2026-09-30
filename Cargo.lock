@@ -4200,6 +4200,9 @@ name = "stt-simple"
 version = "0.1.0"
 dependencies = [
  "cpal",
+ "gio",
+ "glib",
+ "gtk",
  "keyring",
  "nix",
  "serde",

@@ -9,6 +9,8 @@ export function makeSnapshot(overrides: Partial<Snapshot> = {}): Snapshot {
     last_error: null,
     has_api_key: true,
     hotkey_available: true,
+    hotkey_mode: 'native',
+    hotkey_command: null,
     hotkey_message: null,
     recording_seconds: 0,
     ...overrides,

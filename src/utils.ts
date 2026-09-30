@@ -1,8 +1,12 @@
 import type { Action, Phase, Settings, Snapshot } from './types';
 
+export const DEFAULT_MODEL = 'gpt-transcribe';
 export const MODELS = [
+  { value: DEFAULT_MODEL, label: 'GPT Transcribe — рекомендован OpenAI' },
   { value: 'gpt-4o-mini-transcribe', label: 'GPT-4o mini Transcribe' },
+  { value: 'gpt-4o-mini-transcribe-2025-12-15', label: 'GPT-4o mini Transcribe — 2025-12-15' },
   { value: 'gpt-4o-transcribe', label: 'GPT-4o Transcribe' },
+  { value: 'gpt-4o-transcribe-diarize', label: 'GPT-4o Transcribe Diarize — только текст' },
   { value: 'whisper-1', label: 'Whisper 1' },
 ] as const;
 
@@ -62,8 +66,8 @@ export function normalizeSettings(settings: Settings): Settings {
 }
 
 export function validateSettings(settings: Settings): string | null {
-  if (!MODELS.some((model) => model.value === settings.model)) {
-    return 'Выберите одну из доступных моделей распознавания.';
+  if (settings.model.trim() !== settings.model || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(settings.model)) {
+    return 'Укажите ID модели OpenAI: до 128 символов, латинские буквы, цифры, точка, дефис, подчёркивание или двоеточие. Без пробелов.';
   }
   if (settings.input_device !== null && !settings.input_device.trim()) {
     return 'Выберите микрофон или системное устройство по умолчанию.';

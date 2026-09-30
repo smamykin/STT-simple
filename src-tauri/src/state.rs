@@ -16,6 +16,13 @@ pub enum Phase {
     Polishing,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HotkeyMode {
+    Native,
+    System,
+}
+
 #[derive(Clone, Serialize)]
 pub struct Snapshot {
     pub phase: Phase,
@@ -25,6 +32,8 @@ pub struct Snapshot {
     pub last_error: Option<String>,
     pub has_api_key: bool,
     pub hotkey_available: bool,
+    pub hotkey_mode: HotkeyMode,
+    pub hotkey_command: Option<String>,
     pub hotkey_message: Option<String>,
     pub recording_seconds: f64,
 }
@@ -46,6 +55,8 @@ pub struct Data {
     pub has_api_key: bool,
     pub hotkey_available: bool,
     pub hotkey_message: Option<String>,
+    pub hotkey_mode: HotkeyMode,
+    pub hotkey_command: Option<String>,
 }
 
 impl Data {
@@ -58,6 +69,8 @@ impl Data {
             last_error: self.last_error.clone(),
             has_api_key: self.has_api_key,
             hotkey_available: self.hotkey_available,
+            hotkey_mode: self.hotkey_mode,
+            hotkey_command: self.hotkey_command.clone(),
             hotkey_message: self.hotkey_message.clone(),
             recording_seconds: self
                 .session
@@ -109,10 +122,18 @@ mod tests {
             has_api_key: true,
             hotkey_available: false,
             hotkey_message: Some("System shortcut required".into()),
+            hotkey_mode: HotkeyMode::System,
+            hotkey_command: Some("stt-simple --toggle".into()),
         };
         let snapshot = data.snapshot();
         assert_eq!(snapshot.recording_seconds, 0.0);
         assert!(snapshot.has_api_key);
+        assert!(!snapshot.hotkey_available);
+        assert_eq!(snapshot.hotkey_mode, HotkeyMode::System);
+        assert_eq!(
+            snapshot.hotkey_command.as_deref(),
+            Some("stt-simple --toggle")
+        );
         assert!(snapshot.last_transcript.is_none());
         assert!(data.ensure_idle().is_ok());
     }
@@ -128,6 +149,8 @@ mod tests {
             has_api_key: true,
             hotkey_available: false,
             hotkey_message: None,
+            hotkey_mode: HotkeyMode::Native,
+            hotkey_command: None,
         };
         assert!(data.ensure_idle().is_err());
     }

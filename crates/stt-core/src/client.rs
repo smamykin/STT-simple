@@ -64,10 +64,14 @@ impl OpenAiClient {
             .file_name("recording.wav")
             .mime_str("audio/wav")
             .map_err(|_| "Не удалось подготовить WAV к отправке.".to_owned())?;
-        let form = Form::new()
+        let mut form = Form::new()
             .part("file", part)
             .text("model", model.to_owned())
             .text("response_format", "json");
+        if model == "gpt-4o-transcribe-diarize" || model.starts_with("gpt-4o-transcribe-diarize-") {
+            // Required by the diarization model for recordings longer than 30 seconds.
+            form = form.text("chunking_strategy", "auto");
+        }
         #[cfg(test)]
         let endpoint = self.endpoint.as_str();
         #[cfg(not(test))]
@@ -154,6 +158,7 @@ fn status_error(status: StatusCode) -> String {
     match status.as_u16() {
         401 => "OpenAI отклонил API-ключ. Проверьте ключ в настройках и его действительность.",
         403 => "Нет доступа к OpenAI. Проверьте права API-ключа и доступность сервиса для вашего аккаунта.",
+        404 => "Модель недоступна или не найдена. Проверьте идентификатор модели, доступ к ней и поддержку распознавания файлов через OpenAI.",
         413 => "Запись слишком большая для OpenAI. Сократите её до размера менее 25 МБ.",
         408 | 504 => TIMEOUT_ERROR,
         400 | 415 | 422 => "OpenAI не принял запись. Проверьте модель и формат WAV, затем повторите запись.",
@@ -269,10 +274,13 @@ mod tests {
 
     #[tokio::test]
     async fn posts_correct_multipart_and_returns_plain_trimmed_transcription() {
-        let server = MockServer::start(200, r#"{"text":"  Привет.\nБез изменений!  "}"#);
+        let server = MockServer::start(
+            200,
+            r#"{"text":"  Привет.\nБез изменений!  ","languages":[{"code":"ru"}]}"#,
+        );
         let text = server
             .client()
-            .transcribe(SECRET, "gpt-4o-mini-transcribe", PRIVATE_AUDIO.to_vec())
+            .transcribe(SECRET, "gpt-transcribe", PRIVATE_AUDIO.to_vec())
             .await
             .unwrap();
         assert_eq!(text, "Привет.\nБез изменений!");
@@ -288,10 +296,64 @@ mod tests {
         assert!(request.contains("name=\"file\"; filename=\"recording.wav\""));
         assert!(request.contains("Content-Type: audio/wav"));
         assert!(request.contains("RIFF-private-audio-data"));
-        assert!(request.contains("name=\"model\"\r\n\r\ngpt-4o-mini-transcribe"));
+        assert!(request.contains("name=\"model\"\r\n\r\ngpt-transcribe\r\n"));
         assert!(request.contains("name=\"response_format\"\r\n\r\njson"));
         assert!(!request.contains("name=\"prompt\""));
         assert!(!request.contains("name=\"language\""));
+        assert!(!request.contains("name=\"chunking_strategy\""));
+    }
+
+    #[tokio::test]
+    async fn forwards_snapshot_and_custom_ids_without_diarization_parameters() {
+        for model in [
+            "gpt-4o-mini-transcribe",
+            "gpt-4o-transcribe",
+            "whisper-1",
+            "gpt-4o-mini-transcribe-2025-12-15",
+            "gpt-transcribe-2026-01-01",
+            "future-ASR_v2.1:stable",
+            "gpt-4o-transcribe-diarizeCustom",
+            "custom-gpt-4o-transcribe-diarize-2026-01-01",
+        ] {
+            let server = MockServer::start(200, r#"{"text":"  Plain text!  "}"#);
+            let text = server
+                .client()
+                .transcribe(SECRET, model, PRIVATE_AUDIO.to_vec())
+                .await
+                .unwrap();
+            assert_eq!(text, "Plain text!");
+            let request = server.finish();
+            let request = String::from_utf8_lossy(&request);
+            assert!(request.starts_with("POST /v1/audio/transcriptions HTTP/1.1\r\n"));
+            assert!(request.contains(&format!("name=\"model\"\r\n\r\n{model}\r\n")));
+            assert!(request.contains("name=\"response_format\"\r\n\r\njson\r\n"));
+            assert!(!request.contains("name=\"chunking_strategy\""));
+        }
+    }
+
+    #[tokio::test]
+    async fn diarization_alias_and_dated_ids_use_auto_chunking_with_plain_json_text() {
+        for model in [
+            "gpt-4o-transcribe-diarize",
+            "gpt-4o-transcribe-diarize-2026-01-01",
+        ] {
+            let server =
+                MockServer::start(200, r#"{"text":"  First speaker.\nSecond speaker!  "}"#);
+            let text = server
+                .client()
+                .transcribe(SECRET, model, PRIVATE_AUDIO.to_vec())
+                .await
+                .unwrap();
+            assert_eq!(text, "First speaker.\nSecond speaker!");
+            let request = server.finish();
+            let request = String::from_utf8_lossy(&request);
+            assert!(request.starts_with("POST /v1/audio/transcriptions HTTP/1.1\r\n"));
+            assert!(request.contains(&format!("name=\"model\"\r\n\r\n{model}\r\n")));
+            assert!(request.contains("name=\"response_format\"\r\n\r\njson\r\n"));
+            assert!(request.contains("name=\"chunking_strategy\"\r\n\r\nauto\r\n"));
+            assert_eq!(request.matches("name=\"chunking_strategy\"").count(), 1);
+            assert!(!request.contains("name=\"prompt\""));
+        }
     }
 
     #[tokio::test]
@@ -299,6 +361,7 @@ mod tests {
         for (status, expected) in [
             (401, "API-ключ"),
             (403, "прав"),
+            (404, "Модель недоступна или не найдена"),
             (413, "25 МБ"),
             (400, "формат WAV"),
             (500, "временно недоступен"),
@@ -407,7 +470,9 @@ mod tests {
         for (key, model, audio, expected) in [
             ("", "whisper-1", vec![1], "API-ключ"),
             ("bad\nkey", "whisper-1", vec![1], "формат API-ключа"),
-            (SECRET, "invalid", vec![1], "модель"),
+            (SECRET, "invalid/model", vec![1], "идентификатор модели"),
+            (SECRET, "", vec![1], "идентификатор модели"),
+            (SECRET, "gpt-transcribe\n", vec![1], "идентификатор модели"),
             (SECRET, "whisper-1", vec![], "пуста"),
             (SECRET, "whisper-1", vec![0; MAX_AUDIO_BYTES + 1], "25 МБ"),
         ] {

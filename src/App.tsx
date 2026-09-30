@@ -4,7 +4,7 @@ import { backend, inTauri } from './backend';
 import type { Settings } from './types';
 import { useAppState } from './useAppState';
 import {
-  MODELS, canRunAction, formatDuration, isBusy, normalizeSettings, settingsEqual, statusText,
+  DEFAULT_MODEL, MODELS, canRunAction, formatDuration, isBusy, normalizeSettings, settingsEqual, statusText,
   validateApiKey, validateSettings,
 } from './utils';
 
@@ -46,8 +46,9 @@ export default function App() {
     deviceError, refreshDevices, runAction, retry,
   } = useAppState();
   const [draft, setDraft] = useState<Settings>({
-    shortcut: '', model: 'gpt-4o-mini-transcribe', input_device: null,
+    shortcut: '', model: DEFAULT_MODEL, input_device: null,
   });
+  const [manualModel, setManualModel] = useState(false);
   const [apiKey, setApiKey] = useState('');
   const [settingsError, setSettingsError] = useState<string | null>(null);
   const [keyError, setKeyError] = useState<string | null>(null);
@@ -60,6 +61,7 @@ export default function App() {
   useEffect(() => {
     if (savedShortcut === undefined || savedModel === undefined || savedDevice === undefined) return;
     setDraft({ shortcut: savedShortcut, model: savedModel, input_device: savedDevice });
+    setManualModel(!MODELS.some((model) => model.value === savedModel));
     setSettingsError(null);
   }, [savedShortcut, savedModel, savedDevice]);
 
@@ -80,6 +82,8 @@ export default function App() {
   const missingDevice = draft.input_device !== null
     && !devices.some((device) => device.id === draft.input_device);
   const linux = /Linux|X11/i.test(navigator.userAgent) && !/Android/i.test(navigator.userAgent);
+  const systemHotkey = snapshot?.hotkey_mode === 'system';
+  const customModel = manualModel || !MODELS.some((model) => model.value === draft.model);
   const toggleDisabled = !snapshot || !connected || pending !== null || processing
     || (!recording && !snapshot.has_api_key);
 
@@ -175,7 +179,9 @@ export default function App() {
           {snapshot && (
             <p className="shortcut-hint">
               Сочетание: <kbd>{snapshot.settings.shortcut}</kbd>
-              {!snapshot.hotkey_available && <span> · недоступно, используйте кнопку</span>}
+              <span>{systemHotkey
+                ? snapshot.hotkey_available ? ' · настроено в GNOME' : ' · не настроено в GNOME'
+                : snapshot.hotkey_available ? ' · зарегистрировано' : ' · не удалось зарегистрировать'}</span>
             </p>
           )}
         </div>
@@ -230,10 +236,25 @@ export default function App() {
               </div>
               <div className="field">
                 <label htmlFor="model">Модель</label>
-                <select id="model" value={draft.model} onChange={(event) => updateDraft('model', event.target.value)}>
-                  {!MODELS.some((model) => model.value === draft.model) && <option value={draft.model}>Выберите модель</option>}
+                <select id="model" value={customModel ? '__custom__' : draft.model}
+                  aria-describedby="model-help" onChange={(event) => {
+                    const custom = event.target.value === '__custom__';
+                    setManualModel(custom);
+                    if (!custom) updateDraft('model', event.target.value);
+                  }}>
                   {MODELS.map((model) => <option key={model.value} value={model.value}>{model.label}</option>)}
+                  <option value="__custom__">Свой ID модели…</option>
                 </select>
+                {customModel && <>
+                  <label htmlFor="model-id">ID модели OpenAI</label>
+                  <input id="model-id" value={draft.model} maxLength={128} spellCheck={false}
+                    autoComplete="off" autoCapitalize="none" placeholder="gpt-transcribe"
+                    aria-describedby="model-help" onChange={(event) => updateDraft('model', event.target.value)} />
+                </>}
+                <p className="help" id="model-help">GPT Transcribe рекомендован OpenAI для файловой транскрипции.
+                  Можно указать ID другой модели или snapshot. Модель должна поддерживать
+                  <code>/v1/audio/transcriptions</code> и быть доступна вашему API-ключу.
+                  Список — подсказки, не ограничение и не проверка доступа к моделям.</p>
               </div>
               <div className="field">
                 <label htmlFor="shortcut">Сочетание клавиш</label>
@@ -242,9 +263,11 @@ export default function App() {
                   aria-invalid={Boolean(settingsError)}
                   onChange={(event) => updateDraft('shortcut', event.target.value)} />
                 <p className="help" id="shortcut-help">Например, <kbd>Super+R</kbd> или
-                  <kbd>Control+Super+R</kbd>. Меняет сочетание приложения, но не регистрирует его в GNOME.</p>
+                  <kbd>Control+Super+R</kbd>. {systemHotkey
+                    ? 'После сохранения приложение создаст или обновит своё системное сочетание в GNOME. Чужие сочетания не перезаписываются.'
+                    : 'После сохранения приложение зарегистрирует сочетание в системе.'}</p>
               </div>
-              <button className="button button-secondary" type="submit" disabled={!settingsChanged}>
+              <button className="button button-secondary" type="submit" disabled={!settingsChanged && !systemHotkey}>
                 {pending === 'save_settings' ? 'Сохранение…' : 'Сохранить настройки'}
               </button>
             </fieldset>
@@ -295,21 +318,24 @@ export default function App() {
         </section>
       </div>
 
-      {(linux || (snapshot && (!snapshot.hotkey_available || snapshot.hotkey_message))) && (
+      {snapshot && (systemHotkey || !snapshot.hotkey_available || snapshot.hotkey_message) && (
         <aside className="card hotkey-card" aria-labelledby="hotkey-heading">
           <h2 id="hotkey-heading">Системное сочетание клавиш</h2>
           {snapshot?.hotkey_message && <p className="hotkey-message">{snapshot.hotkey_message}</p>}
-          {linux && <>
-            <p>В Wayland задайте сочетание вручную: «Настройки GNOME → Клавиатура →
-              Пользовательские сочетания клавиш». Создайте команду:</p>
-            <code className="command">stt-simple --toggle</code>
-            <p className="help">Рекомендуется указать абсолютный путь к установленному бинарному файлу
-              <code>stt-simple</code>, затем добавить <code>--toggle</code>. Назначьте, например,
-              <kbd>Super+R</kbd>. Настройка сочетания в приложении сама по себе не регистрирует его в GNOME.</p>
-            <p className="help">Для работы в фоне сверните окно. В Linux закрытие окна тоже сворачивает его,
-              а не скрывает в системный трей. Чтобы завершить приложение, нажмите «Выйти».</p>
+          {systemHotkey && <>
+            <p>На Ubuntu GNOME/Wayland нажмите «Сохранить настройки», чтобы применить выбранное
+              сочетание к системе. Команда для этой сборки:</p>
+            <code className="command">{snapshot.hotkey_command ?? 'stt-simple --toggle'}</code>
+            <p className="help">Привязка проверяется при запуске и сохранении настроек. Если комбинация
+              занята, выберите свободную или освободите её в «Настройки GNOME → Клавиатура →
+              Пользовательские сочетания клавиш». Там же можно удалить привязку STT Simple.
+              Она сохраняется после выхода и может запускать приложение. После перемещения бинарника
+              сохраните настройки снова, чтобы обновить путь. В других Wayland-окружениях назначьте
+              показанную команду вручную. Проверка не гарантирует отсутствие перехвата клавиш расширениями GNOME.</p>
           </>}
-          {!linux && !snapshot?.hotkey_available && <p className="help">Используйте кнопку записи.
+          {linux && <p className="help">Для работы в фоне сверните окно. В Linux закрытие окна тоже сворачивает его,
+            а не скрывает в системный трей. Чтобы завершить приложение, нажмите «Выйти».</p>}
+          {!systemHotkey && !snapshot.hotkey_available && <p className="help">Используйте кнопку записи.
             Проверьте, не занято ли сочетание другим приложением, и сохраните другое в настройках.</p>}
         </aside>
       )}

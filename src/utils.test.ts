@@ -96,8 +96,18 @@ describe('settings validation', () => {
       expect(validateSettings({ ...settings, shortcut })).not.toBeNull();
     });
 
-  it('rejects unsupported models and empty device IDs', () => {
-    expect(validateSettings({ ...settings, model: 'unknown' })).not.toBeNull();
+  it('accepts custom model IDs and snapshots without claiming API compatibility', () => {
+    for (const model of ['gpt-transcribe', 'gpt-transcribe-future-snapshot', 'gpt-4o-mini-transcribe-2025-12-15', 'ft:custom_model.v2']) {
+      expect(validateSettings({ ...settings, model })).toBeNull();
+    }
+  });
+
+  it.each(['', ' ', 'gpt transcribe', 'gpt/transcribe', 'gpt\ntranscribe', 'gpt-transcribe\n', 'gpt-transcribe\r', '-invalid', 'модель', 'x'.repeat(129)])
+    ('rejects malformed model ID %j', (model) => {
+      expect(validateSettings({ ...settings, model })).not.toBeNull();
+    });
+
+  it('rejects empty device IDs', () => {
     expect(validateSettings({ ...settings, input_device: '' })).not.toBeNull();
   });
 
