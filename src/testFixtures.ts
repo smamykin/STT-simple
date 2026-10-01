@@ -3,7 +3,7 @@ import type { Snapshot } from './types';
 export function makeSnapshot(overrides: Partial<Snapshot> = {}): Snapshot {
   return {
     phase: 'idle',
-    settings: { shortcut: 'Super+R', model: 'gpt-4o-mini-transcribe', input_device: null },
+    settings: { shortcut: 'Super+R', model: 'gpt-4o-mini-transcribe', input_device: null, auto_paste: false },
     statistics: { last_recording_seconds: 0, total_recording_seconds: 0, recordings: 0 },
     last_transcript: null,
     last_error: null,

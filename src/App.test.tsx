@@ -138,7 +138,9 @@ describe('Russian dictation interface', () => {
   it('saves normalized settings and maps the default microphone to null', async () => {
     const original = makeSnapshot({ settings: { ...makeSnapshot().settings, input_device: 'mic-1' } });
     await mount(original);
-    const settings = { shortcut: 'Control+Super+R', model: 'whisper-1', input_device: null };
+    const settings = {
+      shortcut: 'Control+Super+R', model: 'whisper-1', input_device: null, auto_paste: false,
+    };
     const saved = makeSnapshot({ settings });
     backend.saveSettings.mockResolvedValue(saved);
     backend.getSnapshot.mockResolvedValue(saved);
@@ -148,6 +150,29 @@ describe('Russian dictation interface', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Сохранить настройки' }));
     await waitFor(() => expect(backend.saveSettings).toHaveBeenCalledExactlyOnceWith(settings));
     await screen.findByText('Настройки сохранены.');
+  });
+
+  it('offers macOS auto-paste and persists the choice with an Accessibility explanation', async () => {
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/605.1.15',
+    );
+    await mount();
+    const autoPaste = screen.getByLabelText('Автоматически вставлять результат');
+    expect(autoPaste).toHaveProperty('checked', false);
+    expect(screen.getByText(/разрешение «Универсальный доступ»/)).toBeTruthy();
+    const saved = makeSnapshot({ settings: { ...makeSnapshot().settings, auto_paste: true } });
+    backend.saveSettings.mockResolvedValue(saved);
+    backend.getSnapshot.mockResolvedValue(saved);
+    fireEvent.click(autoPaste);
+    fireEvent.click(screen.getByRole('button', { name: 'Сохранить настройки' }));
+    await waitFor(() => expect(backend.saveSettings).toHaveBeenCalledWith(saved.settings));
+    expect(screen.getByText(/автоматически вставляется в активное поле/)).toBeTruthy();
+  });
+
+  it('does not offer macOS auto-paste on Linux', async () => {
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (X11; Linux x86_64)');
+    await mount();
+    expect(screen.queryByLabelText('Автоматически вставлять результат')).toBeNull();
   });
 
   it('saves the password transiently and clears it as soon as the backend accepts it', async () => {

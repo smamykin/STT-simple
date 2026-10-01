@@ -46,7 +46,7 @@ export default function App() {
     deviceError, refreshDevices, runAction, retry,
   } = useAppState();
   const [draft, setDraft] = useState<Settings>({
-    shortcut: '', model: DEFAULT_MODEL, input_device: null,
+    shortcut: '', model: DEFAULT_MODEL, input_device: null, auto_paste: false,
   });
   const [manualModel, setManualModel] = useState(false);
   const [apiKey, setApiKey] = useState('');
@@ -58,12 +58,16 @@ export default function App() {
   const savedShortcut = snapshot?.settings.shortcut;
   const savedModel = snapshot?.settings.model;
   const savedDevice = snapshot?.settings.input_device;
+  const savedAutoPaste = snapshot?.settings.auto_paste;
   useEffect(() => {
-    if (savedShortcut === undefined || savedModel === undefined || savedDevice === undefined) return;
-    setDraft({ shortcut: savedShortcut, model: savedModel, input_device: savedDevice });
+    if (savedShortcut === undefined || savedModel === undefined || savedDevice === undefined
+      || savedAutoPaste === undefined) return;
+    setDraft({
+      shortcut: savedShortcut, model: savedModel, input_device: savedDevice, auto_paste: savedAutoPaste,
+    });
     setManualModel(!MODELS.some((model) => model.value === savedModel));
     setSettingsError(null);
-  }, [savedShortcut, savedModel, savedDevice]);
+  }, [savedShortcut, savedModel, savedDevice, savedAutoPaste]);
 
   useEffect(() => {
     if (!feedback) return;
@@ -82,6 +86,7 @@ export default function App() {
   const missingDevice = draft.input_device !== null
     && !devices.some((device) => device.id === draft.input_device);
   const linux = /Linux|X11/i.test(navigator.userAgent) && !/Android/i.test(navigator.userAgent);
+  const mac = /Macintosh|Mac OS X/i.test(navigator.userAgent);
   const systemHotkey = snapshot?.hotkey_mode === 'system';
   const customModel = manualModel || !MODELS.some((model) => model.value === draft.model);
   const toggleDisabled = !snapshot || !connected || pending !== null || processing
@@ -204,7 +209,9 @@ export default function App() {
         <textarea id="transcript" className="transcript" readOnly rows={7}
           value={snapshot?.last_transcript ?? ''} placeholder="Здесь появится распознанный текст."
           aria-describedby="transcript-help" />
-        <p className="help" id="transcript-help">Скопируйте текст и вставьте его куда нужно. Автоматической вставки нет.</p>
+        <p className="help" id="transcript-help">{mac && snapshot?.settings.auto_paste
+          ? 'При диктовке через hotkey текст автоматически вставляется в активное поле и остаётся в буфере обмена.'
+          : 'Текст копируется в буфер обмена — вставьте его сочетанием Cmd+V или Ctrl+V.'}</p>
       </section>
 
       <div className="settings-grid">
@@ -263,10 +270,21 @@ export default function App() {
                   aria-invalid={Boolean(settingsError)}
                   onChange={(event) => updateDraft('shortcut', event.target.value)} />
                 <p className="help" id="shortcut-help">Например, <kbd>Super+R</kbd> или
-                  <kbd>Control+Super+R</kbd>. {systemHotkey
+                  <kbd>Control+Super+R</kbd>. {mac && 'На macOS Super означает Command. '}{systemHotkey
                     ? 'После сохранения приложение создаст или обновит своё системное сочетание в GNOME. Чужие сочетания не перезаписываются.'
                     : 'После сохранения приложение зарегистрирует сочетание в системе.'}</p>
               </div>
+              {mac && (
+                <div className="field checkbox-field">
+                  <label className="checkbox-label" htmlFor="auto-paste">
+                    <input id="auto-paste" type="checkbox" checked={draft.auto_paste}
+                      onChange={(event) => updateDraft('auto_paste', event.target.checked)} />
+                    <span>Автоматически вставлять результат</span>
+                  </label>
+                  <p className="help">Работает для записи, начатой глобальным hotkey. macOS запросит
+                    разрешение «Универсальный доступ»; при отказе текст всё равно останется в буфере обмена.</p>
+                </div>
+              )}
               <button className="button button-secondary" type="submit" disabled={!settingsChanged && !systemHotkey}>
                 {pending === 'save_settings' ? 'Сохранение…' : 'Сохранить настройки'}
               </button>

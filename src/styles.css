@@ -80,6 +80,8 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 .field-heading { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 10px; }
 .field-heading label { margin-bottom: 9px; }
 .field-heading .text-button { padding-top: 0; }
+.checkbox-label { display: flex !important; align-items: center; gap: 10px; cursor: pointer; }
+.checkbox-label input { appearance: auto; flex: 0 0 auto; width: 18px; height: 18px; min-height: 0; margin: 0; padding: 0; border: 0; background: transparent; accent-color: var(--accent); }
 input, select { display: block; width: 100%; min-height: 44px; padding: 11px 12px; border: 1px solid #3b4654; border-radius: 8px; background: #12181e; color: #e4eaf0; font-size: 0.85rem; }
 input::placeholder { color: #8c9ba9; }
 input[aria-invalid="true"] { border-color: #dc8b96; }

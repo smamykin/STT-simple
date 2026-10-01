@@ -43,6 +43,7 @@ pub struct Session {
     pub recorder: Recorder,
     pub api_key: Zeroizing<String>,
     pub model: String,
+    pub auto_paste: bool,
 }
 
 pub struct Data {

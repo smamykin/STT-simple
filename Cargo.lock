@@ -2423,6 +2423,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "macos-accessibility-client"
+version = "0.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "edf7710fbff50c24124331760978fb9086d6de6288dcdb38b25a97f8b1bdebbb"
+dependencies = [
+ "core-foundation 0.9.4",
+ "core-foundation-sys",
+]
+
+[[package]]
 name = "markup5ever"
 version = "0.39.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4199,11 +4209,13 @@ dependencies = [
 name = "stt-simple"
 version = "0.1.0"
 dependencies = [
+ "core-graphics",
  "cpal",
  "gio",
  "glib",
  "gtk",
  "keyring",
+ "macos-accessibility-client",
  "nix",
  "serde",
  "stt-core",

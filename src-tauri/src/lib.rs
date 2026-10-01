@@ -1,3 +1,4 @@
+mod auto_paste;
 mod clipboard;
 mod credentials;
 #[cfg(target_os = "linux")]
@@ -14,6 +15,23 @@ use stt_core::{load_data, save_data, OpenAiClient, Settings, Statistics, StoredD
 use tauri::{AppHandle, Manager, WindowEvent};
 use tauri_plugin_global_shortcut::ShortcutState;
 use zeroize::Zeroizing;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ToggleOrigin {
+    Manual,
+    Shortcut,
+    Automatic,
+}
+
+impl ToggleOrigin {
+    fn starts_auto_paste(self, settings: &Settings) -> bool {
+        cfg!(target_os = "macos") && settings.auto_paste && self == Self::Shortcut
+    }
+
+    fn finishes_auto_paste(self) -> bool {
+        matches!(self, Self::Shortcut | Self::Automatic)
+    }
+}
 
 #[derive(Default)]
 struct StartupQueue {
@@ -78,12 +96,16 @@ async fn save_settings(app: AppHandle, mut settings: Settings) -> Result<Snapsho
             }
         });
     }
+    let accessibility_warning = settings
+        .auto_paste
+        .then(auto_paste::request_permission)
+        .flatten();
     {
         let mut data = runtime.data.lock().expect("application state poisoned");
         data.stored.settings = settings;
         data.hotkey_available = true;
         data.hotkey_message = None;
-        data.last_error = outcome.durability_warning;
+        data.last_error = outcome.durability_warning.or(accessibility_warning);
     }
     *runtime
         .shortcut_pressed
@@ -165,10 +187,14 @@ async fn reset_statistics(app: AppHandle) -> Result<Snapshot, String> {
 
 #[tauri::command]
 async fn toggle_recording(app: AppHandle) -> Result<(), String> {
-    toggle(&app, None).await
+    toggle(&app, None, ToggleOrigin::Manual).await
 }
 
-async fn toggle(app: &AppHandle, expected_session: Option<u64>) -> Result<(), String> {
+async fn toggle(
+    app: &AppHandle,
+    expected_session: Option<u64>,
+    origin: ToggleOrigin,
+) -> Result<(), String> {
     let runtime = app.state::<Runtime>();
     // Do not queue key repeats into a surprise stop/start after an operation completes.
     let guard = match runtime.control.try_lock() {
@@ -189,6 +215,7 @@ async fn toggle(app: &AppHandle, expected_session: Option<u64>) -> Result<(), St
     match phase {
         Phase::Idle => {
             let settings = runtime.snapshot().settings;
+            let auto_paste = origin.starts_auto_paste(&settings);
             let started = async {
                 let key = blocking(credentials::load).await?;
                 let api_key = key.ok_or_else(|| {
@@ -208,6 +235,7 @@ async fn toggle(app: &AppHandle, expected_session: Option<u64>) -> Result<(), St
                         recorder,
                         api_key,
                         model,
+                        auto_paste,
                     });
                     data.phase = Phase::Recording;
                     data.has_api_key = true;
@@ -245,6 +273,7 @@ async fn toggle(app: &AppHandle, expected_session: Option<u64>) -> Result<(), St
                 recorder,
                 api_key,
                 model,
+                auto_paste,
                 ..
             } = session;
             let fallback_duration = recorder.duration();
@@ -274,7 +303,13 @@ async fn toggle(app: &AppHandle, expected_session: Option<u64>) -> Result<(), St
                         .lock()
                         .expect("application state poisoned")
                         .last_transcript = Some(text.clone());
-                    clipboard::write_text(app, text).await
+                    clipboard::write_text(app, text).await.and_then(|()| {
+                        if auto_paste && origin.finishes_auto_paste() {
+                            auto_paste::paste()
+                        } else {
+                            Ok(())
+                        }
+                    })
                 }
                 Err(error) => Err(error),
             };
@@ -436,6 +471,12 @@ pub(crate) fn spawn_toggle(app: AppHandle) {
     });
 }
 
+fn spawn_shortcut_toggle(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let _ = toggle(&app, None, ToggleOrigin::Shortcut).await;
+    });
+}
+
 pub(crate) fn spawn_cancel(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         let _ = cancel_recording(app).await;
@@ -467,7 +508,7 @@ fn monitor_microphone(app: AppHandle) {
                 if let Some(error) = problem {
                     let _ = cancel(&app, Some(id), Some(error)).await;
                 } else if limit {
-                    let _ = toggle(&app, Some(id)).await;
+                    let _ = toggle(&app, Some(id), ToggleOrigin::Automatic).await;
                 }
             }
         }
@@ -476,7 +517,7 @@ fn monitor_microphone(app: AppHandle) {
 
 fn dispatch_request(app: &AppHandle, toggle: bool) {
     if toggle {
-        spawn_toggle(app.clone());
+        spawn_shortcut_toggle(app.clone());
     } else {
         let handle = app.clone();
         let _ = app.run_on_main_thread(move || tray::show_window(&handle));
@@ -518,7 +559,7 @@ pub fn run() {
                     match event.state() {
                         ShortcutState::Pressed if !*pressed => {
                             *pressed = true;
-                            spawn_toggle(app.clone());
+                            spawn_shortcut_toggle(app.clone());
                         }
                         ShortcutState::Released => {
                             *pressed = false;
@@ -591,4 +632,28 @@ pub fn run() {
             toggle_recording, cancel_recording, copy_last_transcript, quit_app])
         .run(tauri::generate_context!())
         .expect("failed to run STT Simple");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auto_paste_requires_a_shortcut_started_session() {
+        let mut settings = Settings {
+            auto_paste: true,
+            ..Settings::default()
+        };
+        assert_eq!(
+            ToggleOrigin::Shortcut.starts_auto_paste(&settings),
+            cfg!(target_os = "macos")
+        );
+        assert!(!ToggleOrigin::Manual.starts_auto_paste(&settings));
+        settings.auto_paste = false;
+        assert!(!ToggleOrigin::Shortcut.starts_auto_paste(&settings));
+
+        assert!(ToggleOrigin::Shortcut.finishes_auto_paste());
+        assert!(ToggleOrigin::Automatic.finishes_auto_paste());
+        assert!(!ToggleOrigin::Manual.finishes_auto_paste());
+    }
 }

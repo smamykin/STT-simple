@@ -4,6 +4,7 @@ export interface Settings {
   shortcut: string;
   model: string;
   input_device: string | null;
+  auto_paste: boolean;
 }
 
 export interface Statistics {

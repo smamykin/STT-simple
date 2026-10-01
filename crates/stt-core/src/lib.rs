@@ -22,6 +22,7 @@ pub struct Settings {
     pub shortcut: String,
     pub model: String,
     pub input_device: Option<String>,
+    pub auto_paste: bool,
 }
 
 impl Default for Settings {
@@ -35,6 +36,7 @@ impl Default for Settings {
             .to_owned(),
             model: DEFAULT_MODEL.to_owned(),
             input_device: None,
+            auto_paste: false,
         }
     }
 }
@@ -130,6 +132,7 @@ mod tests {
         assert_eq!(DEFAULT_MODEL, "gpt-transcribe");
         assert_eq!(settings.model, DEFAULT_MODEL);
         assert_eq!(settings.input_device, None);
+        assert!(!settings.auto_paste);
         assert_eq!(
             settings.shortcut,
             if cfg!(target_os = "macos") {

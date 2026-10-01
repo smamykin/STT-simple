@@ -62,6 +62,7 @@ export function normalizeSettings(settings: Settings): Settings {
     shortcut: settings.shortcut.split('+').map((part) => part.trim()).join('+'),
     model: settings.model.trim(),
     input_device: settings.input_device,
+    auto_paste: settings.auto_paste,
   };
 }
 
@@ -91,7 +92,8 @@ export function validateSettings(settings: Settings): string | null {
 export function settingsEqual(left: Settings, right: Settings): boolean {
   return left.shortcut === right.shortcut
     && left.model === right.model
-    && left.input_device === right.input_device;
+    && left.input_device === right.input_device
+    && left.auto_paste === right.auto_paste;
 }
 
 export function validateApiKey(key: string): string | null {
