@@ -2,12 +2,12 @@ import { describe, expect, it } from 'vitest';
 import { makeSnapshot } from './testFixtures';
 import type { Action, Settings } from './types';
 import {
-  MODELS, canRunAction, errorMessage, formatDuration, isBusy, normalizeSettings,
+  MODELS, canRunAction, createPolishProfileId, errorMessage, formatDuration, isBusy, normalizeSettings,
   settingsEqual, statusText, validateApiKey, validateSettings,
 } from './utils';
 
 const settings: Settings = {
-  shortcut: 'Super+R', model: 'gpt-4o-mini-transcribe', input_device: null, auto_paste: false, paste_shortcut: 'ctrl_v',
+  ...makeSnapshot().settings,
 };
 
 const configurationActions: Action[] = [
@@ -39,7 +39,7 @@ describe('status and action guards', () => {
   });
 
   it('does not enable actions without an initial snapshot', () => {
-    for (const action of [...configurationActions, 'toggle_recording', 'cancel_recording', 'copy_last_transcript'] as Action[]) {
+    for (const action of [...configurationActions, 'toggle_recording', 'cancel_recording', 'copy_last_transcript', 'retry_polish'] as Action[]) {
       expect(canRunAction(action, null)).toBe(false);
     }
   });
@@ -68,12 +68,12 @@ describe('status and action guards', () => {
     expect(canRunAction('copy_last_transcript', makeSnapshot({ phase, last_transcript: 'Текст' }))).toBe(false);
   });
 
-  it('uses Russian status labels and treats the reserved phase as processing', () => {
+  it('uses distinct Russian status labels for transcription and polishing', () => {
     expect(isBusy('idle')).toBe(false);
     expect(statusText('idle')).toBe('Готово к диктовке');
     expect(statusText('recording')).toBe('Идёт запись');
     expect(statusText('transcribing')).toBe('Обработка записи');
-    expect(statusText('polishing')).toBe(statusText('transcribing'));
+    expect(statusText('polishing')).toBe('Обработка текста');
   });
 });
 
@@ -87,8 +87,8 @@ describe('settings validation', () => {
   });
 
   it.each(['ctrl_v', 'ctrl_shift_v'] as const)('normalizes whitespace without replacing the device or paste chord %s', (paste_shortcut) => {
-    expect(normalizeSettings({ shortcut: ' Control + Super + R ', model: ' whisper-1 ', input_device: 'mic-1', auto_paste: true, paste_shortcut }))
-      .toEqual({ shortcut: 'Control+Super+R', model: 'whisper-1', input_device: 'mic-1', auto_paste: true, paste_shortcut });
+    expect(normalizeSettings({ ...settings, shortcut: ' Control + Super + R ', model: ' whisper-1 ', input_device: 'mic-1', auto_paste: true, paste_shortcut }))
+      .toEqual({ ...settings, shortcut: 'Control+Super+R', model: 'whisper-1', input_device: 'mic-1', auto_paste: true, paste_shortcut });
   });
 
   it.each(['', ' ', 'R', 'Super', 'Super+', 'Super++R', 'Super+Super+R', 'Unknown+R', 'Super+\nR'])
@@ -118,6 +118,79 @@ describe('settings validation', () => {
     expect(settingsEqual(settings, { ...settings, input_device: 'mic-1' })).toBe(false);
     expect(settingsEqual(settings, { ...settings, auto_paste: true })).toBe(false);
     expect(settingsEqual(settings, { ...settings, paste_shortcut: 'ctrl_shift_v' })).toBe(false);
+  });
+});
+
+describe('polishing settings and retry guards', () => {
+  const profile = { id: 'custom-example', name: 'Профиль', instruction: 'Инструкция' };
+  const withProfile: Settings = { ...settings, polish: { ...settings.polish, profile_id: profile.id, custom_profiles: [profile] } };
+
+  it('normalizes model, profile name and instruction without mutating the input', () => {
+    const input = { ...withProfile, polish: { ...withProfile.polish, model: ' gpt-5 ', custom_profiles: [{ ...profile, name: ' Имя ', instruction: ' Первая\n  вторая ' }] } };
+    const normalized = normalizeSettings(input);
+    expect(normalized.polish).toEqual({ profile_id: profile.id, model: 'gpt-5', effort: null, custom_profiles: [{ ...profile, name: 'Имя', instruction: 'Первая\n  вторая' }] });
+    expect(input.polish.model).toBe(' gpt-5 ');
+    expect(input.polish.custom_profiles[0]?.name).toBe(' Имя ');
+  });
+
+  it('compares every polishing field by value, including changes within profiles', () => {
+    expect(settingsEqual(withProfile, structuredClone(withProfile))).toBe(true);
+    for (const polish of [
+      { ...withProfile.polish, model: 'gpt-5' },
+      { ...withProfile.polish, profile_id: null },
+      { ...withProfile.polish, effort: 'none' },
+      { ...withProfile.polish, custom_profiles: [] },
+      ...['id', 'name', 'instruction'].map((field) => ({ ...withProfile.polish, custom_profiles: [{ ...profile, [field]: 'different' }] })),
+    ]) expect(settingsEqual(withProfile, { ...withProfile, polish })).toBe(false);
+  });
+
+  it('generates safe distinct IDs without using profile names', () => {
+    const id = createPolishProfileId([profile]);
+    const second = createPolishProfileId([profile, { ...profile, id }]);
+    expect(id).toMatch(/^custom-[a-f0-9-]+$/);
+    expect(second).not.toBe(id);
+    expect(validateSettings({ ...settings, polish: { ...settings.polish, custom_profiles: [{ ...profile, id }] } })).toBeNull();
+  });
+
+  it('rejects invalid models, efforts, missing selections and invalid or conflicting custom profiles even when off', () => {
+    for (const polish of [
+      { ...settings.polish, model: '' },
+      { ...settings.polish, model: 'gpt 5' },
+      { ...settings.polish, model: 'gpt-5\n' },
+      { ...settings.polish, effort: '' },
+      { ...settings.polish, effort: 'extreme' },
+      { ...settings.polish, profile_id: 'missing' },
+      ...[
+        [profile, profile],
+        [{ ...profile, id: 'polish' }],
+        [{ ...profile, id: 'markdown' }],
+        [{ ...profile, id: 'developer' }],
+        [{ ...profile, id: 'bad id' }],
+        [{ ...profile, id: 'custom\n' }],
+        [{ ...profile, name: 'я'.repeat(81) }],
+        [{ ...profile, instruction: 'я'.repeat(8001) }],
+        Array.from({ length: 33 }, (_, index) => ({ ...profile, id: `custom-${index}` })),
+        [{ ...profile, name: ' ' }],
+        [{ ...profile, instruction: '\n' }],
+      ].map((custom_profiles) => ({ ...settings.polish, custom_profiles })),
+    ]) expect(validateSettings({ ...settings, polish })).not.toBeNull();
+    expect(validateSettings(withProfile)).toBeNull();
+    expect(validateSettings({ ...settings, polish: { ...settings.polish, custom_profiles: [
+      { id: 'custom.v2:test', name: '😀'.repeat(80), instruction: '😀'.repeat(8000) },
+    ] } })).toBeNull();
+    for (const effort of [null, 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']) {
+      expect(validateSettings({ ...settings, polish: { ...settings.polish, effort } })).toBeNull();
+    }
+  });
+
+  it('allows retry only when idle, with a key and a failed job flagged by the backend', () => {
+    const ready = makeSnapshot({ can_retry_polish: true });
+    expect(canRunAction('retry_polish', ready)).toBe(true);
+    expect(canRunAction('retry_polish', { ...ready, can_retry_polish: false })).toBe(false);
+    expect(canRunAction('retry_polish', { ...ready, has_api_key: false })).toBe(false);
+    for (const phase of ['recording', 'transcribing', 'polishing'] as const) {
+      expect(canRunAction('retry_polish', { ...ready, phase })).toBe(false);
+    }
   });
 });
 

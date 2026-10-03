@@ -13,6 +13,7 @@ const ACTION_LABELS: Record<Action, string> = {
   cancel_recording: 'Не удалось отменить запись',
   reset_statistics: 'Не удалось сбросить статистику',
   copy_last_transcript: 'Не удалось скопировать текст',
+  retry_polish: 'Не удалось повторить обработку текста',
   quit_app: 'Не удалось закрыть приложение',
 };
 

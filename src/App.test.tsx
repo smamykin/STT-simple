@@ -11,6 +11,7 @@ import { MODELS } from './utils';
 const backend = vi.hoisted(() => ({
   getSnapshot: vi.fn(),
   listInputDevices: vi.fn(),
+  listOpenAiModels: vi.fn(),
   saveSettings: vi.fn(),
   setApiKey: vi.fn(),
   deleteApiKey: vi.fn(),
@@ -18,6 +19,7 @@ const backend = vi.hoisted(() => ({
   cancelRecording: vi.fn(),
   resetStatistics: vi.fn(),
   copyLastTranscript: vi.fn(),
+  retryPolish: vi.fn(),
   quitApp: vi.fn(),
   subscribe: vi.fn(),
 }));
@@ -56,6 +58,253 @@ afterEach(() => {
   cleanup();
   vi.useRealTimers();
   vi.restoreAllMocks();
+});
+
+describe('polishing interface', () => {
+  const refreshModels = () => screen.getByRole('button', { name: 'Обновить модели OpenAI' });
+
+  it('refreshes explicitly, deduplicates without capability filtering and preserves dirty settings on errors and empty results', async () => {
+    await mount();
+    expect(backend.listOpenAiModels).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText('Сочетание клавиш'), { target: { value: 'Super+T' } });
+    const response = deferred<{ id: string; created: number }[]>();
+    backend.listOpenAiModels.mockReturnValueOnce(response.promise);
+    act(() => { fireEvent.click(refreshModels()); fireEvent.click(refreshModels()); });
+    expect(backend.listOpenAiModels).toHaveBeenCalledTimes(1);
+    expect(screen.getByText('Загрузка моделей OpenAI…')).toBeTruthy();
+    await act(async () => response.resolve(['gpt-6-luna', 'whisper-1', 'embedding-model', 'whisper-1'].map((id) => ({ id, created: 1 }))));
+    const select = screen.getByLabelText('Модель обработки текста') as HTMLSelectElement;
+    expect(select.value).toBe('gpt-6-luna');
+    expect(Array.from(select.options).filter((option) => option.value === 'gpt-6-luna')).toHaveLength(1);
+    expect(screen.getByRole('group', { name: 'Каталог OpenAI — совместимость не проверена' }).textContent).toBe('whisper-1embedding-model');
+    fireEvent.change(select, { target: { value: 'embedding-model' } });
+    fireEvent.change(screen.getByLabelText('Уровень рассуждения'), { target: { value: 'max' } });
+    backend.listOpenAiModels.mockRejectedValueOnce(new Error('Catalog unavailable'));
+    fireEvent.click(refreshModels());
+    await screen.findByText(/Catalog unavailable/);
+    expect(select.value).toBe('embedding-model');
+    expect(screen.getByLabelText('Уровень рассуждения')).toHaveProperty('value', 'max');
+    expect(screen.getByLabelText('Сочетание клавиш')).toHaveProperty('value', 'Super+T');
+    backend.listOpenAiModels.mockResolvedValueOnce([]);
+    fireEvent.click(refreshModels());
+    await screen.findByText(/Нет дополнительных моделей/);
+    expect(screen.getByLabelText('ID модели обработки OpenAI')).toHaveProperty('value', 'embedding-model');
+    expect(backend.saveSettings).not.toHaveBeenCalled();
+  });
+
+  it('invalidates pending catalogs when replacing a stored key and on unmount', async () => {
+    const app = await mount();
+    const stale = deferred<{ id: string; created: number }[]>();
+    backend.listOpenAiModels.mockReturnValueOnce(stale.promise);
+    fireEvent.click(refreshModels());
+    backend.setApiKey.mockResolvedValue(makeSnapshot());
+    fireEvent.change(screen.getByLabelText('Новый ключ'), { target: { value: 'test-only-key' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Сохранить ключ' }));
+    await waitFor(() => expect(screen.getByLabelText('Новый ключ')).toHaveProperty('value', ''));
+    await act(async () => stale.resolve([{ id: 'stale-model', created: 1 }]));
+    expect(screen.queryByRole('option', { name: 'stale-model' })).toBeNull();
+    const pending = deferred<{ id: string; created: number }[]>();
+    backend.listOpenAiModels.mockReturnValueOnce(pending.promise);
+    await waitFor(() => expect(refreshModels().matches(':disabled')).toBe(false));
+    fireEvent.click(refreshModels());
+    app.unmount();
+    await act(async () => pending.reject(new Error('late error')));
+  });
+
+  it('disables catalog refresh when the backend is disconnected', async () => {
+    backend.getSnapshot.mockRejectedValue(new Error('offline'));
+    render(<App />);
+    await screen.findByText('Нет связи с приложением');
+    expect(refreshModels().matches(':disabled')).toBe(true);
+    fireEvent.click(refreshModels());
+    expect(backend.listOpenAiModels).not.toHaveBeenCalled();
+  });
+
+  it('allows manual IDs without a key and inherits busy disabling', async () => {
+    const snapshot = makeSnapshot({ has_api_key: false });
+    await mount(snapshot);
+    expect(refreshModels().matches(':disabled')).toBe(true);
+    fireEvent.change(screen.getByLabelText('Модель обработки текста'), { target: { value: '__custom__' } });
+    fireEvent.change(screen.getByLabelText('ID модели обработки OpenAI'), { target: { value: 'my-model' } });
+    expect(screen.getByLabelText('ID модели обработки OpenAI')).toHaveProperty('value', 'my-model');
+    emit(makeSnapshot({ phase: 'polishing' }));
+    expect(refreshModels().matches(':disabled')).toBe(true);
+    expect(backend.listOpenAiModels).not.toHaveBeenCalled();
+  });
+
+  it.each(['gpt-6-luna', 'gpt-6.1-sol', 'gpt-6-astra'])('shows documented efforts for %s and retains incompatible saved values', async (model) => {
+    const snapshot = makeSnapshot();
+    snapshot.settings.polish = { ...snapshot.settings.polish, model, effort: 'minimal' };
+    await mount(snapshot);
+    const effort = screen.getByLabelText('Уровень рассуждения') as HTMLSelectElement;
+    expect(effort.value).toBe('minimal');
+    expect(screen.getByText(/не поддерживается выбранной моделью/)).toBeTruthy();
+    expect(Array.from(effort.options).map((option) => option.value)).toEqual([
+      '', 'minimal', ...(model === 'gpt-6-luna' ? ['none'] : []), 'low', 'medium', 'high', 'xhigh', 'max',
+    ]);
+    expect(backend.saveSettings).not.toHaveBeenCalled();
+  });
+
+  it('preserves legacy saved models and exposes all efforts for unknown capabilities', async () => {
+    const snapshot = makeSnapshot();
+    snapshot.settings.polish = { ...snapshot.settings.polish, model: 'gpt-5-mini', effort: 'minimal' };
+    await mount(snapshot);
+    expect(screen.getByLabelText('ID модели обработки OpenAI')).toHaveProperty('value', 'gpt-5-mini');
+    expect(screen.getByLabelText('Уровень рассуждения')).toHaveProperty('value', 'minimal');
+    expect(screen.getByText(/\/models не содержит метаданных/)).toBeTruthy();
+    expect(Array.from((screen.getByLabelText('Уровень рассуждения') as HTMLSelectElement).options).map((option) => option.value))
+      .toEqual(['', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
+  });
+  it('loads builtin profiles from the snapshot and keeps their instructions immutable', async () => {
+    const snapshot = makeSnapshot();
+    snapshot.builtin_polish_profiles[0] = { id: 'polish', name: 'Правка из core', instruction: 'Инструкция из core' };
+    await mount(snapshot);
+    expect(screen.getByLabelText('Профиль обработки текста')).toHaveProperty('value', '');
+    expect(screen.getByLabelText('Модель обработки текста')).toHaveProperty('value', 'gpt-6-luna');
+    expect(screen.getByLabelText('Уровень рассуждения')).toHaveProperty('value', '');
+    expect(screen.getByText(/дополнительный платный запрос/)).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('Профиль обработки текста'), { target: { value: 'polish' } });
+    expect(screen.getByLabelText('Инструкция профиля')).toHaveProperty('value', 'Инструкция из core');
+    expect(screen.getByLabelText('Инструкция профиля')).toHaveProperty('readOnly', true);
+    expect(screen.queryByLabelText('Название профиля')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Удалить профиль' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Дублировать профиль' }));
+    expect(screen.getByLabelText('Название профиля')).toHaveProperty('value', 'Правка из core — копия');
+    expect(screen.getByLabelText('Инструкция профиля')).toHaveProperty('readOnly', false);
+    expect((screen.getByLabelText('Профиль обработки текста') as HTMLSelectElement).value).not.toBe('polish');
+    expect(backend.saveSettings).not.toHaveBeenCalled();
+  });
+
+  it('creates, edits and deletes custom profiles only through the existing settings save', async () => {
+    let snapshot = makeSnapshot();
+    await mount(snapshot);
+    backend.saveSettings.mockImplementation(async (settings: Settings) => {
+      snapshot = { ...snapshot, settings };
+      backend.getSnapshot.mockResolvedValue(snapshot);
+      return snapshot;
+    });
+    const save = async () => {
+      vi.spyOn(performance, 'now').mockReturnValue(performance.now() + 1000);
+      fireEvent.click(screen.getByRole('button', { name: 'Сохранить настройки' }));
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Сохранить настройки' })).toHaveProperty('disabled', true));
+      await waitFor(() => expect(screen.getByLabelText('Профиль обработки текста').matches(':disabled')).toBe(false));
+    };
+    fireEvent.click(screen.getByRole('button', { name: 'Создать профиль' }));
+    const id = (screen.getByLabelText('Профиль обработки текста') as HTMLSelectElement).value;
+    expect(id).toMatch(/^custom-[a-f0-9-]+$/);
+    fireEvent.change(screen.getByLabelText('Название профиля'), { target: { value: ' Мой профиль ' } });
+    fireEvent.change(screen.getByLabelText('Инструкция профиля'), { target: { value: ' Сохрани\nвсе детали. ' } });
+    expect(backend.saveSettings).not.toHaveBeenCalled();
+    await save();
+    expect(snapshot.settings.polish.custom_profiles).toEqual([{ id, name: 'Мой профиль', instruction: 'Сохрани\nвсе детали.' }]);
+    expect(snapshot.settings.polish.profile_id).toBe(id);
+    fireEvent.change(screen.getByLabelText('Название профиля'), { target: { value: 'Правка' } });
+    fireEvent.change(screen.getByLabelText('Инструкция профиля'), { target: { value: 'Новая инструкция' } });
+    // Even a settings-changing state event must not discard a dirty form.
+    emit({ ...snapshot, settings: { ...snapshot.settings, model: 'whisper-1' } });
+    expect(screen.getByLabelText('Название профиля')).toHaveProperty('value', 'Правка');
+    expect(screen.getByLabelText('Инструкция профиля')).toHaveProperty('value', 'Новая инструкция');
+    await save();
+    expect(snapshot.settings.polish.custom_profiles).toEqual([{ id, name: 'Правка', instruction: 'Новая инструкция' }]);
+    fireEvent.click(screen.getByRole('button', { name: 'Удалить профиль' }));
+    expect(screen.getByLabelText('Профиль обработки текста')).toHaveProperty('value', '');
+    expect(snapshot.settings.polish.custom_profiles).toHaveLength(1);
+    await save();
+    expect(snapshot.settings.polish).toEqual({ profile_id: null, model: 'gpt-6-luna', effort: null, custom_profiles: [] });
+    expect(backend.saveSettings).toHaveBeenCalledTimes(3);
+  });
+
+  it.each(['', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])('saves a custom model and effort %j without resetting the draft on state events', async (effort) => {
+    const initial = makeSnapshot();
+    await mount(initial);
+    fireEvent.change(screen.getByLabelText('Профиль обработки текста'), { target: { value: 'developer' } });
+    fireEvent.change(screen.getByLabelText('Модель обработки текста'), { target: { value: '__custom__' } });
+    fireEvent.change(screen.getByLabelText('ID модели обработки OpenAI'), { target: { value: ' custom-model.v2 ' } });
+    fireEvent.change(screen.getByLabelText('Уровень рассуждения'), { target: { value: effort } });
+    emit(structuredClone(initial));
+    expect(screen.getByLabelText('ID модели обработки OpenAI')).toHaveProperty('value', ' custom-model.v2 ');
+    const settings = { ...initial.settings, polish: { ...initial.settings.polish, profile_id: 'developer', model: 'custom-model.v2', effort: effort || null } };
+    const saved = { ...initial, settings };
+    backend.saveSettings.mockResolvedValue(saved);
+    backend.getSnapshot.mockResolvedValue(saved);
+    fireEvent.click(screen.getByRole('button', { name: 'Сохранить настройки' }));
+    await waitFor(() => expect(backend.saveSettings).toHaveBeenCalledExactlyOnceWith(settings));
+    await screen.findByText('Настройки сохранены.');
+  });
+
+  it('validates custom profiles even when processing is switched off and retains drafts after a failed save', async () => {
+    await mount();
+    fireEvent.click(screen.getByRole('button', { name: 'Создать профиль' }));
+    fireEvent.change(screen.getByLabelText('Профиль обработки текста'), { target: { value: '' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Сохранить настройки' }));
+    expect(await screen.findByText(/должны быть название и инструкция/)).toBeTruthy();
+    expect(backend.saveSettings).not.toHaveBeenCalled();
+    const option = screen.getByRole('option', { name: 'Новый профиль' }) as HTMLOptionElement;
+    fireEvent.change(screen.getByLabelText('Профиль обработки текста'), { target: { value: option.value } });
+    fireEvent.change(screen.getByLabelText('Инструкция профиля'), { target: { value: 'Моя инструкция' } });
+    backend.saveSettings.mockRejectedValue(new Error('Не удалось сохранить'));
+    fireEvent.click(screen.getByRole('button', { name: 'Сохранить настройки' }));
+    await screen.findByText('Действие не выполнено');
+    emit(structuredClone(makeSnapshot()));
+    expect(screen.getByLabelText('Инструкция профиля')).toHaveProperty('value', 'Моя инструкция');
+  });
+
+  it('retries only the failed backend job without submitting draft settings or copying the raw text', async () => {
+    const initial = makeSnapshot({ last_raw_transcript: 'сырой текст', last_transcript: 'Предыдущий успех', can_retry_polish: true });
+    await mount(initial);
+    expect(screen.getByLabelText('Исходный текст распознавания')).toHaveProperty('value', 'сырой текст');
+    expect(screen.getByLabelText('Текст последней диктовки')).toHaveProperty('value', 'Предыдущий успех');
+    fireEvent.change(screen.getByLabelText('Профиль обработки текста'), { target: { value: 'markdown' } });
+    expect(screen.getByText(/Повтор использует настройки неудавшейся задачи/)).toBeTruthy();
+    const retry = deferred<void>();
+    backend.retryPolish.mockReturnValue(retry.promise);
+    fireEvent.click(screen.getByRole('button', { name: 'Повторить обработку текста' }));
+    expect(backend.retryPolish).toHaveBeenCalledExactlyOnceWith();
+    expect(screen.getByRole('button', { name: 'Повтор…' })).toHaveProperty('disabled', true);
+    expect(screen.getByLabelText('Профиль обработки текста').matches(':disabled')).toBe(true);
+    expect(backend.saveSettings).not.toHaveBeenCalled();
+    expect(backend.copyLastTranscript).not.toHaveBeenCalled();
+    const success = { ...initial, can_retry_polish: false, last_transcript: 'Готовый результат' };
+    backend.getSnapshot.mockResolvedValue(success);
+    await act(async () => retry.resolve());
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Повторить обработку текста' })).toBeNull());
+    expect(screen.getByLabelText('Текст последней диктовки')).toHaveProperty('value', 'Готовый результат');
+    expect(screen.getByLabelText('Профиль обработки текста')).toHaveProperty('value', 'markdown');
+  });
+
+  it.each(['recording', 'transcribing', 'polishing', 'no-key', 'unavailable'] as const)('does not allow retry in %s', async (state) => {
+    await mount(makeSnapshot({
+      phase: state === 'no-key' || state === 'unavailable' ? 'idle' : state,
+      can_retry_polish: state !== 'unavailable', has_api_key: state !== 'no-key',
+      last_raw_transcript: 'Текст',
+    }));
+    const button = screen.queryByRole('button', { name: 'Повторить обработку текста' });
+    if (state === 'unavailable') expect(button).toBeNull();
+    else expect(button).toHaveProperty('disabled', true);
+    expect(backend.retryPolish).not.toHaveBeenCalled();
+    expect(screen.getByLabelText('Текст последней диктовки')).toHaveProperty('value', '');
+  });
+
+  it.each(['recording', 'transcribing', 'polishing'] as const)('locks custom profile editing during %s', async (phase) => {
+    const snapshot = makeSnapshot({ phase });
+    snapshot.settings.polish = { ...snapshot.settings.polish, profile_id: 'custom-test',
+      custom_profiles: [{ id: 'custom-test', name: 'Профиль', instruction: 'Инструкция' }] };
+    await mount(snapshot);
+    for (const label of ['Название профиля', 'Инструкция профиля']) {
+      expect(screen.getByLabelText(label).matches(':disabled')).toBe(true);
+    }
+    for (const name of ['Создать профиль', 'Дублировать профиль', 'Удалить профиль']) {
+      expect(screen.getByRole('button', { name }).matches(':disabled')).toBe(true);
+    }
+  });
+
+  it('reports retry errors without replacing the last successful text', async () => {
+    await mount(makeSnapshot({ can_retry_polish: true, last_transcript: 'Успех', last_raw_transcript: 'Исходный' }));
+    backend.retryPolish.mockRejectedValue(new Error('OpenAI недоступен'));
+    fireEvent.click(screen.getByRole('button', { name: 'Повторить обработку текста' }));
+    await screen.findByText(/Не удалось повторить обработку текста: OpenAI недоступен/);
+    expect(screen.getByLabelText('Текст последней диктовки')).toHaveProperty('value', 'Успех');
+  });
 });
 
 describe('Russian dictation interface', () => {
@@ -106,7 +355,7 @@ describe('Russian dictation interface', () => {
       phase,
       statistics: { last_recording_seconds: 5, total_recording_seconds: 5, recordings: 1 },
     }));
-    for (const label of ['Микрофон', 'Модель', 'Сочетание клавиш', 'Новый ключ']) {
+    for (const label of ['Микрофон', 'Модель', 'Сочетание клавиш', 'Новый ключ', 'Профиль обработки текста', 'Модель обработки текста', 'Уровень рассуждения']) {
       expect((screen.getByLabelText(label) as HTMLInputElement).matches(':disabled')).toBe(true);
     }
     expect(screen.getByRole('button', { name: 'Сбросить' })).toHaveProperty('disabled', true);
@@ -139,6 +388,7 @@ describe('Russian dictation interface', () => {
     const original = makeSnapshot({ settings: { ...makeSnapshot().settings, input_device: 'mic-1' } });
     await mount(original);
     const settings: Settings = {
+      ...makeSnapshot().settings,
       shortcut: 'Control+Super+R', model: 'whisper-1', input_device: null, auto_paste: false, paste_shortcut: 'ctrl_v',
     };
     const saved = makeSnapshot({ settings });

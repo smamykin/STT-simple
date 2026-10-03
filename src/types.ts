@@ -1,11 +1,25 @@
 export type Phase = 'idle' | 'recording' | 'transcribing' | 'polishing';
 
+export interface PolishProfile {
+  id: string;
+  name: string;
+  instruction: string;
+}
+
+export interface PolishSettings {
+  profile_id: string | null;
+  model: string;
+  effort: string | null;
+  custom_profiles: PolishProfile[];
+}
+
 export interface Settings {
   shortcut: string;
   model: string;
   input_device: string | null;
   auto_paste: boolean;
   paste_shortcut: 'ctrl_v' | 'ctrl_shift_v';
+  polish: PolishSettings;
 }
 
 export interface Statistics {
@@ -19,6 +33,9 @@ export interface Snapshot {
   settings: Settings;
   statistics: Statistics;
   last_transcript: string | null;
+  last_raw_transcript: string | null;
+  can_retry_polish: boolean;
+  builtin_polish_profiles: PolishProfile[];
   last_error: string | null;
   has_api_key: boolean;
   hotkey_available: boolean;
@@ -42,4 +59,5 @@ export type Action =
   | 'cancel_recording'
   | 'reset_statistics'
   | 'copy_last_transcript'
+  | 'retry_polish'
   | 'quit_app';

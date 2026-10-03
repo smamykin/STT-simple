@@ -1,13 +1,15 @@
-//! Shared settings, local persistence, WAV encoding, and direct speech transcription.
+//! Shared settings, local persistence, WAV encoding, speech transcription, and optional polishing.
 //! API keys and transcripts are intentionally absent from persisted data.
 
 mod audio;
 mod client;
 mod persistence;
+mod polish;
 
 pub use audio::encode_wav;
-pub use client::OpenAiClient;
+pub use client::{OpenAiClient, OpenAiModel};
 pub use persistence::{load_data, save_data, SaveOutcome};
+pub use polish::{builtin_polish_profiles, PolishProfile, PolishSettings};
 
 use serde::{Deserialize, Serialize};
 
@@ -32,6 +34,7 @@ pub struct Settings {
     pub input_device: Option<String>,
     pub auto_paste: bool,
     pub paste_shortcut: PasteShortcut,
+    pub polish: PolishSettings,
 }
 
 impl Default for Settings {
@@ -47,6 +50,7 @@ impl Default for Settings {
             input_device: None,
             auto_paste: false,
             paste_shortcut: PasteShortcut::default(),
+            polish: PolishSettings::default(),
         }
     }
 }
@@ -54,6 +58,7 @@ impl Default for Settings {
 impl Settings {
     pub fn validate(&self) -> Result<(), String> {
         validate_model(&self.model)?;
+        self.polish.validate()?;
         if self.shortcut.trim().is_empty() || self.shortcut.chars().count() > 128 {
             return Err("Укажите сочетание клавиш длиной от 1 до 128 символов.".into());
         }

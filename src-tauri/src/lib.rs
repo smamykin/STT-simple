@@ -11,7 +11,7 @@ mod tray;
 use state::{Data, HotkeyMode, Phase, Runtime, Session, Snapshot};
 use std::sync::Mutex;
 use std::time::Duration;
-use stt_core::{load_data, save_data, OpenAiClient, Settings, Statistics, StoredData};
+use stt_core::{load_data, save_data, OpenAiClient, OpenAiModel, Settings, Statistics, StoredData};
 use tauri::{AppHandle, Manager, WindowEvent};
 use tauri_plugin_global_shortcut::ShortcutState;
 use zeroize::Zeroizing;
@@ -67,6 +67,32 @@ async fn list_input_devices() -> Result<Vec<recorder::InputDevice>, String> {
 }
 
 #[tauri::command]
+async fn list_openai_models(app: AppHandle) -> Result<Vec<OpenAiModel>, String> {
+    let runtime = app.state::<Runtime>();
+    let key = load_models_key(&runtime, credentials::load).await?;
+    runtime.client.list_models(&key).await
+}
+
+async fn load_models_key<F>(runtime: &Runtime, load: F) -> Result<Zeroizing<String>, String>
+where
+    F: FnOnce() -> Result<Option<Zeroizing<String>>, String> + Send + 'static,
+{
+    let _guard = runtime
+        .control
+        .try_lock()
+        .map_err(|_| "Дождитесь завершения предыдущего действия.".to_owned())?;
+    runtime
+        .data
+        .lock()
+        .expect("application state poisoned")
+        .ensure_idle()?;
+    // Keep credential changes serialized, but release control before any HTTP request.
+    blocking(load)
+        .await?
+        .ok_or_else(|| "Добавьте API-ключ OpenAI в настройках.".to_owned())
+}
+
+#[tauri::command]
 async fn save_settings(app: AppHandle, mut settings: Settings) -> Result<Snapshot, String> {
     settings.shortcut = settings.shortcut.trim().to_owned();
     settings.validate()?;
@@ -107,7 +133,7 @@ async fn save_settings(app: AppHandle, mut settings: Settings) -> Result<Snapsho
         data.stored.settings = settings;
         data.hotkey_available = true;
         data.hotkey_message = None;
-        data.last_error = outcome.durability_warning.or(accessibility_warning);
+        data.update_warning(outcome.durability_warning.or(accessibility_warning));
     }
     *runtime
         .shortcut_pressed
@@ -134,7 +160,7 @@ async fn set_api_key(app: AppHandle, api_key: String) -> Result<Snapshot, String
     {
         let mut data = runtime.data.lock().expect("application state poisoned");
         data.has_api_key = true;
-        data.last_error = None;
+        data.update_warning(None);
     }
     tray::publish(&app);
     Ok(runtime.snapshot())
@@ -156,7 +182,7 @@ async fn delete_api_key(app: AppHandle) -> Result<Snapshot, String> {
     {
         let mut data = runtime.data.lock().expect("application state poisoned");
         data.has_api_key = false;
-        data.last_error = None;
+        data.update_warning(None);
     }
     tray::publish(&app);
     Ok(runtime.snapshot())
@@ -181,7 +207,7 @@ async fn reset_statistics(app: AppHandle) -> Result<Snapshot, String> {
     {
         let mut data = runtime.data.lock().expect("application state poisoned");
         data.stored = stored;
-        data.last_error = outcome.durability_warning;
+        data.update_warning(outcome.durability_warning);
     }
     tray::publish(&app);
     Ok(runtime.snapshot())
@@ -219,6 +245,7 @@ async fn toggle(
             let settings = runtime.snapshot().settings;
             let auto_paste = origin.starts_auto_paste(&settings);
             let paste_shortcut = settings.paste_shortcut;
+            let polish = settings.polish.clone();
             let started = async {
                 let key = blocking(credentials::load).await?;
                 let api_key = key.ok_or_else(|| {
@@ -238,12 +265,12 @@ async fn toggle(
                         recorder,
                         api_key,
                         model,
+                        polish,
                         auto_paste,
                         paste_shortcut,
                     });
-                    data.phase = Phase::Recording;
+                    data.recording_started();
                     data.has_api_key = true;
-                    data.last_error = None;
                     drop(data);
                     tray::publish(app);
                     Ok(())
@@ -277,6 +304,7 @@ async fn toggle(
                 recorder,
                 api_key,
                 model,
+                polish,
                 auto_paste,
                 paste_shortcut,
                 ..
@@ -298,16 +326,32 @@ async fn toggle(
                 Ok(wav) => runtime.client.transcribe(&api_key, &model, wav).await,
                 Err(error) => Err(error),
             };
+            let processed = match recognized {
+                Ok(raw) => {
+                    let selected = runtime
+                        .data
+                        .lock()
+                        .expect("application state poisoned")
+                        .accept_transcript(raw.clone(), polish.clone());
+                    tray::publish(app);
+                    match selected {
+                        Ok(true) => runtime.client.polish(&api_key, &polish, &raw).await,
+                        Ok(false) => Ok(raw),
+                        Err(error) => Err(error),
+                    }
+                }
+                Err(error) => Err(error),
+            };
             // Finalize under the control lock: readiness, result and error are one commit.
             let _completion = runtime.control.lock().await;
-            let result = match recognized {
+            let result = match processed {
                 Ok(text) => {
                     let _clipboard = runtime.clipboard.lock().await;
                     runtime
                         .data
                         .lock()
                         .expect("application state poisoned")
-                        .last_transcript = Some(text.clone());
+                        .accept_output(text.clone());
                     match clipboard::write_text(app, text).await {
                         Ok(()) if auto_paste && origin.finishes_auto_paste() => {
                             auto_paste::paste(paste_shortcut).await
@@ -322,6 +366,55 @@ async fn toggle(
         }
         Phase::Transcribing | Phase::Polishing => Ok(()),
     }
+}
+
+#[tauri::command]
+async fn retry_polish(app: AppHandle) -> Result<(), String> {
+    let runtime = app.state::<Runtime>();
+    let guard = runtime
+        .control
+        .try_lock()
+        .map_err(|_| "Дождитесь завершения предыдущего действия.".to_owned())?;
+    // Reject busy/no-job requests without altering their error or result state.
+    runtime
+        .data
+        .lock()
+        .expect("application state poisoned")
+        .retry_job()?;
+    let key = match blocking(credentials::load).await {
+        Ok(Some(key)) => key,
+        result => {
+            let error = result
+                .err()
+                .unwrap_or_else(|| "Добавьте API-ключ OpenAI для повторной обработки.".into());
+            commit_idle(&app, Some(error.clone()));
+            return Err(error);
+        }
+    };
+    let (raw, settings) = runtime
+        .data
+        .lock()
+        .expect("application state poisoned")
+        .begin_retry()?;
+    tray::publish(&app);
+    drop(guard);
+    let polished = runtime.client.polish(&key, &settings, &raw).await;
+    let _completion = runtime.control.lock().await;
+    let result = match polished {
+        Ok(text) => {
+            runtime
+                .data
+                .lock()
+                .expect("application state poisoned")
+                .accept_output(text.clone());
+            let _clipboard = runtime.clipboard.lock().await;
+            // A retry may run in a different focused application: never synthesize paste.
+            clipboard::write_text(&app, text).await
+        }
+        Err(error) => Err(error),
+    };
+    commit_idle(&app, result.as_ref().err().cloned());
+    result
 }
 
 async fn add_statistics(app: &AppHandle, seconds: f64) {
@@ -593,7 +686,7 @@ pub fn run() {
             let client = OpenAiClient::new().map_err(std::io::Error::other)?;
             app.manage(Runtime {
                 data: Mutex::new(Data { stored, phase: Phase::Idle, session: None, next_session_id: 0,
-                    last_transcript: None, last_error, has_api_key,
+                    last_transcript: None, last_raw_transcript: None, pending_polish: None, last_error, has_api_key,
                     hotkey_available: false, hotkey_message: None,
                     hotkey_mode: if wayland { HotkeyMode::System } else { HotkeyMode::Native },
                     hotkey_command: if wayland { Some(shortcuts::wayland_command()) } else { None } }),
@@ -631,9 +724,9 @@ pub fn run() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![get_snapshot, list_input_devices,
+        .invoke_handler(tauri::generate_handler![get_snapshot, list_input_devices, list_openai_models,
             save_settings, set_api_key, delete_api_key, reset_statistics,
-            toggle_recording, cancel_recording, copy_last_transcript, quit_app])
+            toggle_recording, cancel_recording, copy_last_transcript, retry_polish, quit_app])
         .run(tauri::generate_context!())
         .expect("failed to run STT Simple");
 }
@@ -641,6 +734,87 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn models_runtime(phase: Phase) -> Runtime {
+        Runtime {
+            data: Mutex::new(Data {
+                stored: StoredData::default(),
+                phase,
+                session: None,
+                next_session_id: 0,
+                last_transcript: Some("previous".into()),
+                last_raw_transcript: None,
+                pending_polish: None,
+                last_error: Some("previous error".into()),
+                has_api_key: false,
+                hotkey_available: false,
+                hotkey_message: None,
+                hotkey_mode: HotkeyMode::Native,
+                hotkey_command: None,
+            }),
+            control: tokio::sync::Mutex::new(()),
+            clipboard: tokio::sync::Mutex::new(()),
+            shortcut_pressed: Mutex::new(false),
+            client: OpenAiClient::new().unwrap(),
+            storage_path: Default::default(),
+        }
+    }
+
+    #[test]
+    fn models_credentials_require_idle_and_control_before_loading() {
+        tauri::async_runtime::block_on(async {
+            for phase in [Phase::Recording, Phase::Transcribing, Phase::Polishing] {
+                let runtime = models_runtime(phase);
+                assert!(
+                    load_models_key(&runtime, || panic!("must not load while busy"))
+                        .await
+                        .is_err()
+                );
+                assert!(runtime.control.try_lock().is_ok());
+            }
+            let runtime = models_runtime(Phase::Idle);
+            let guard = runtime.control.lock().await;
+            assert!(
+                load_models_key(&runtime, || panic!("must not load without control"))
+                    .await
+                    .is_err()
+            );
+            drop(guard);
+        });
+    }
+
+    #[test]
+    fn models_credentials_release_control_and_preserve_state() {
+        tauri::async_runtime::block_on(async {
+            let runtime = std::sync::Arc::new(models_runtime(Phase::Idle));
+            let loading = runtime.clone();
+            let key = load_models_key(&runtime, move || {
+                assert!(loading.control.try_lock().is_err());
+                assert!(loading.data.try_lock().is_ok());
+                Ok(Some(Zeroizing::new("test-key".into())))
+            })
+            .await
+            .unwrap();
+            assert_eq!(key.as_str(), "test-key");
+            // The caller can now await HTTP without blocking recording/settings commands.
+            assert!(runtime.control.try_lock().is_ok());
+            assert!(load_models_key(&runtime, || Ok(None)).await.is_err());
+            assert_eq!(
+                load_models_key(&runtime, || Err("keyring unavailable".into()))
+                    .await
+                    .unwrap_err(),
+                "keyring unavailable"
+            );
+            assert!(runtime.control.try_lock().is_ok());
+            let data = runtime.data.lock().unwrap();
+            assert!(data.phase == Phase::Idle);
+            assert_eq!(data.stored.settings, Settings::default());
+            assert_eq!(data.stored.statistics.recordings, 0);
+            assert_eq!(data.last_transcript.as_deref(), Some("previous"));
+            assert_eq!(data.last_error.as_deref(), Some("previous error"));
+            assert!(!data.has_api_key);
+        });
+    }
 
     #[test]
     fn auto_paste_requires_a_shortcut_started_session() {

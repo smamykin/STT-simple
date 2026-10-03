@@ -1,4 +1,22 @@
-import type { Action, Phase, Settings, Snapshot } from './types';
+import type { Action, Phase, PolishProfile, Settings, Snapshot } from './types';
+
+export const POLISH_MODELS = ['gpt-6-luna', 'gpt-6.1-sol', 'gpt-6-astra'];
+export const POLISH_EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+// Documented capabilities; /models only supplies IDs and creation timestamps.
+export const POLISH_MODEL_EFFORTS: Readonly<Record<string, readonly string[] | undefined>> = {
+  'gpt-6-luna': ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
+  'gpt-6.1-sol': ['low', 'medium', 'high', 'xhigh', 'max'],
+  'gpt-6-astra': ['low', 'medium', 'high', 'xhigh', 'max'],
+};
+export const BUILTIN_POLISH_IDS = ['polish', 'markdown', 'developer'];
+export const MAX_CUSTOM_POLISH_PROFILES = 32;
+
+export function createPolishProfileId(profiles: PolishProfile[]): string {
+  const ids = new Set([...BUILTIN_POLISH_IDS, ...profiles.map((profile) => profile.id)]);
+  let id: string;
+  do { id = `custom-${crypto.randomUUID()}`; } while (ids.has(id));
+  return id;
+}
 
 export const DEFAULT_MODEL = 'gpt-transcribe';
 export const MODELS = [
@@ -32,9 +50,9 @@ export function statusText(phase: Phase): string {
     case 'recording':
       return 'Идёт запись';
     case 'transcribing':
-    case 'polishing':
-      // The reserved phase is treated as busy, without offering a polishing feature.
       return 'Обработка записи';
+    case 'polishing':
+      return 'Обработка текста';
   }
 }
 
@@ -46,6 +64,8 @@ export function canRunAction(action: Action, snapshot: Snapshot | null): boolean
         || (snapshot.phase === 'idle' && snapshot.has_api_key);
     case 'cancel_recording':
       return snapshot.phase === 'recording';
+    case 'retry_polish':
+      return snapshot.phase === 'idle' && snapshot.has_api_key && snapshot.can_retry_polish;
     case 'copy_last_transcript':
       return snapshot.phase === 'idle' && Boolean(snapshot.last_transcript);
     default:
@@ -64,10 +84,43 @@ export function normalizeSettings(settings: Settings): Settings {
     input_device: settings.input_device,
     auto_paste: settings.auto_paste,
     paste_shortcut: settings.paste_shortcut,
+    polish: {
+      ...settings.polish,
+      model: settings.polish.model.trim(),
+      custom_profiles: settings.polish.custom_profiles.map((profile) => ({
+        ...profile, name: profile.name.trim(), instruction: profile.instruction.trim(),
+      })),
+    },
   };
 }
 
-export function validateSettings(settings: Settings): string | null {
+export function validateSettings(settings: Settings, builtinIds: readonly string[] = BUILTIN_POLISH_IDS): string | null {
+  const polish = settings.polish;
+  if (polish.model.trim() !== polish.model || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(polish.model)) {
+    return 'Укажите корректный ID модели обработки текста: до 128 символов, без пробелов.';
+  }
+  if (polish.effort !== null && !POLISH_EFFORTS.includes(polish.effort)) {
+    return 'Выберите допустимый уровень рассуждения.';
+  }
+  if (polish.custom_profiles.length > MAX_CUSTOM_POLISH_PROFILES) {
+    return 'Можно сохранить не более 32 пользовательских профилей обработки.';
+  }
+  const ids = new Set([...BUILTIN_POLISH_IDS, ...builtinIds]);
+  for (const profile of polish.custom_profiles) {
+    if (profile.id.trim() !== profile.id || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(profile.id) || ids.has(profile.id)) {
+      return 'ID пользовательских профилей должны быть уникальными и не совпадать со встроенными.';
+    }
+    if (!profile.name.trim() || !profile.instruction.trim()) {
+      return 'У каждого пользовательского профиля должны быть название и инструкция.';
+    }
+    if ([...profile.name].length > 80 || [...profile.instruction].length > 8000) {
+      return 'Название профиля — до 80 символов, инструкция — до 8000 символов.';
+    }
+    ids.add(profile.id);
+  }
+  if (polish.profile_id !== null && !ids.has(polish.profile_id)) {
+    return 'Выберите существующий профиль обработки текста или выключите обработку.';
+  }
   if (settings.model.trim() !== settings.model || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(settings.model)) {
     return 'Укажите ID модели OpenAI: до 128 символов, латинские буквы, цифры, точка, дефис, подчёркивание или двоеточие. Без пробелов.';
   }
@@ -95,7 +148,15 @@ export function settingsEqual(left: Settings, right: Settings): boolean {
     && left.model === right.model
     && left.input_device === right.input_device
     && left.auto_paste === right.auto_paste
-    && left.paste_shortcut === right.paste_shortcut;
+    && left.paste_shortcut === right.paste_shortcut
+    && left.polish.profile_id === right.polish.profile_id
+    && left.polish.model === right.polish.model
+    && left.polish.effort === right.polish.effort
+    && left.polish.custom_profiles.length === right.polish.custom_profiles.length
+    && left.polish.custom_profiles.every((profile, index) => {
+      const other = right.polish.custom_profiles[index];
+      return other !== undefined && profile.id === other.id && profile.name === other.name && profile.instruction === other.instruction;
+    });
 }
 
 export function validateApiKey(key: string): string | null {

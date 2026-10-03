@@ -85,7 +85,7 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 input, select { display: block; width: 100%; min-height: 44px; padding: 11px 12px; border: 1px solid #3b4654; border-radius: 8px; background: #12181e; color: #e4eaf0; font-size: 0.85rem; }
 input::placeholder { color: #8c9ba9; }
 input[aria-invalid="true"] { border-color: #dc8b96; }
-input:disabled, select:disabled { opacity: 0.65; cursor: not-allowed; }
+input:disabled, select:disabled, textarea:disabled { opacity: 0.65; cursor: not-allowed; }
 .form-actions { display: flex; flex-wrap: wrap; gap: 10px; }
 .key-badge { padding: 5px 8px; border-radius: 5px; background: #29313a; color: #b9c4cf; font-size: 0.72rem; }
 .key-saved { color: #b7e8d8; background: #223b32; }
