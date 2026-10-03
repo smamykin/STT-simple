@@ -63,6 +63,7 @@ export function normalizeSettings(settings: Settings): Settings {
     model: settings.model.trim(),
     input_device: settings.input_device,
     auto_paste: settings.auto_paste,
+    paste_shortcut: settings.paste_shortcut,
   };
 }
 
@@ -93,7 +94,8 @@ export function settingsEqual(left: Settings, right: Settings): boolean {
   return left.shortcut === right.shortcut
     && left.model === right.model
     && left.input_device === right.input_device
-    && left.auto_paste === right.auto_paste;
+    && left.auto_paste === right.auto_paste
+    && left.paste_shortcut === right.paste_shortcut;
 }
 
 export function validateApiKey(key: string): string | null {

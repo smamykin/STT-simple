@@ -141,6 +141,7 @@ mod tests {
         let mut data = StoredData::default();
         data.settings.input_device = Some("микрофон-1".into());
         data.settings.auto_paste = true;
+        data.settings.paste_shortcut = crate::PasteShortcut::CtrlShiftV;
         data.statistics.add_recording(3.5).unwrap();
         let outcome = save_data(&path, &data).unwrap();
         assert_eq!(outcome.durability_warning, None);

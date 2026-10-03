@@ -7,7 +7,7 @@ import {
 } from './utils';
 
 const settings: Settings = {
-  shortcut: 'Super+R', model: 'gpt-4o-mini-transcribe', input_device: null, auto_paste: false,
+  shortcut: 'Super+R', model: 'gpt-4o-mini-transcribe', input_device: null, auto_paste: false, paste_shortcut: 'ctrl_v',
 };
 
 const configurationActions: Action[] = [
@@ -86,9 +86,9 @@ describe('settings validation', () => {
     }
   });
 
-  it('normalizes whitespace without replacing the selected device', () => {
-    expect(normalizeSettings({ shortcut: ' Control + Super + R ', model: ' whisper-1 ', input_device: 'mic-1', auto_paste: true }))
-      .toEqual({ shortcut: 'Control+Super+R', model: 'whisper-1', input_device: 'mic-1', auto_paste: true });
+  it.each(['ctrl_v', 'ctrl_shift_v'] as const)('normalizes whitespace without replacing the device or paste chord %s', (paste_shortcut) => {
+    expect(normalizeSettings({ shortcut: ' Control + Super + R ', model: ' whisper-1 ', input_device: 'mic-1', auto_paste: true, paste_shortcut }))
+      .toEqual({ shortcut: 'Control+Super+R', model: 'whisper-1', input_device: 'mic-1', auto_paste: true, paste_shortcut });
   });
 
   it.each(['', ' ', 'R', 'Super', 'Super+', 'Super++R', 'Super+Super+R', 'Unknown+R', 'Super+\nR'])
@@ -117,6 +117,7 @@ describe('settings validation', () => {
     expect(settingsEqual(settings, { ...settings, model: 'whisper-1' })).toBe(false);
     expect(settingsEqual(settings, { ...settings, input_device: 'mic-1' })).toBe(false);
     expect(settingsEqual(settings, { ...settings, auto_paste: true })).toBe(false);
+    expect(settingsEqual(settings, { ...settings, paste_shortcut: 'ctrl_shift_v' })).toBe(false);
   });
 });
 

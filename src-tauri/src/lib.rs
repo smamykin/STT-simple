@@ -25,7 +25,9 @@ enum ToggleOrigin {
 
 impl ToggleOrigin {
     fn starts_auto_paste(self, settings: &Settings) -> bool {
-        cfg!(target_os = "macos") && settings.auto_paste && self == Self::Shortcut
+        cfg!(any(target_os = "macos", target_os = "linux"))
+            && settings.auto_paste
+            && self == Self::Shortcut
     }
 
     fn finishes_auto_paste(self) -> bool {
@@ -216,6 +218,7 @@ async fn toggle(
         Phase::Idle => {
             let settings = runtime.snapshot().settings;
             let auto_paste = origin.starts_auto_paste(&settings);
+            let paste_shortcut = settings.paste_shortcut;
             let started = async {
                 let key = blocking(credentials::load).await?;
                 let api_key = key.ok_or_else(|| {
@@ -236,6 +239,7 @@ async fn toggle(
                         api_key,
                         model,
                         auto_paste,
+                        paste_shortcut,
                     });
                     data.phase = Phase::Recording;
                     data.has_api_key = true;
@@ -274,6 +278,7 @@ async fn toggle(
                 api_key,
                 model,
                 auto_paste,
+                paste_shortcut,
                 ..
             } = session;
             let fallback_duration = recorder.duration();
@@ -303,13 +308,12 @@ async fn toggle(
                         .lock()
                         .expect("application state poisoned")
                         .last_transcript = Some(text.clone());
-                    clipboard::write_text(app, text).await.and_then(|()| {
-                        if auto_paste && origin.finishes_auto_paste() {
-                            auto_paste::paste()
-                        } else {
-                            Ok(())
+                    match clipboard::write_text(app, text).await {
+                        Ok(()) if auto_paste && origin.finishes_auto_paste() => {
+                            auto_paste::paste(paste_shortcut).await
                         }
-                    })
+                        result => result,
+                    }
                 }
                 Err(error) => Err(error),
             };
@@ -646,7 +650,7 @@ mod tests {
         };
         assert_eq!(
             ToggleOrigin::Shortcut.starts_auto_paste(&settings),
-            cfg!(target_os = "macos")
+            cfg!(any(target_os = "macos", target_os = "linux"))
         );
         assert!(!ToggleOrigin::Manual.starts_auto_paste(&settings));
         settings.auto_paste = false;

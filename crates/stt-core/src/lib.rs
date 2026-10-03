@@ -16,6 +16,14 @@ pub const MAX_RECORDING_SECONDS: u64 = 600;
 pub(crate) const MAX_AUDIO_BYTES: usize = 25 * 1024 * 1024;
 pub const DEFAULT_MODEL: &str = "gpt-transcribe";
 
+#[derive(Clone, Copy, Default, Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PasteShortcut {
+    #[default]
+    CtrlV,
+    CtrlShiftV,
+}
+
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 #[serde(default)]
 pub struct Settings {
@@ -23,6 +31,7 @@ pub struct Settings {
     pub model: String,
     pub input_device: Option<String>,
     pub auto_paste: bool,
+    pub paste_shortcut: PasteShortcut,
 }
 
 impl Default for Settings {
@@ -37,6 +46,7 @@ impl Default for Settings {
             model: DEFAULT_MODEL.to_owned(),
             input_device: None,
             auto_paste: false,
+            paste_shortcut: PasteShortcut::default(),
         }
     }
 }
@@ -125,6 +135,26 @@ pub struct StoredData {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paste_shortcut_defaults_for_old_settings_and_roundtrips() {
+        let old: Settings = serde_json::from_str(r#"{"auto_paste":true}"#).unwrap();
+        assert!(old.auto_paste);
+        assert_eq!(old.paste_shortcut, PasteShortcut::CtrlV);
+        for (shortcut, value) in [
+            (PasteShortcut::CtrlV, "ctrl_v"),
+            (PasteShortcut::CtrlShiftV, "ctrl_shift_v"),
+        ] {
+            let settings = Settings {
+                paste_shortcut: shortcut,
+                ..old.clone()
+            };
+            let json = serde_json::to_value(&settings).unwrap();
+            assert_eq!(json["paste_shortcut"], value);
+            assert_eq!(serde_json::from_value::<Settings>(json).unwrap(), settings);
+        }
+        assert!(serde_json::from_str::<Settings>(r#"{"paste_shortcut":"alt_v"}"#).is_err());
+    }
 
     #[test]
     fn default_settings_and_valid_model_ids() {

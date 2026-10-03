@@ -44,6 +44,7 @@ pub struct Session {
     pub api_key: Zeroizing<String>,
     pub model: String,
     pub auto_paste: bool,
+    pub paste_shortcut: stt_core::PasteShortcut,
 }
 
 pub struct Data {

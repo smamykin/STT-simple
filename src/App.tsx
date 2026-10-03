@@ -46,7 +46,7 @@ export default function App() {
     deviceError, refreshDevices, runAction, retry,
   } = useAppState();
   const [draft, setDraft] = useState<Settings>({
-    shortcut: '', model: DEFAULT_MODEL, input_device: null, auto_paste: false,
+    shortcut: '', model: DEFAULT_MODEL, input_device: null, auto_paste: false, paste_shortcut: 'ctrl_v',
   });
   const [manualModel, setManualModel] = useState(false);
   const [apiKey, setApiKey] = useState('');
@@ -59,15 +59,17 @@ export default function App() {
   const savedModel = snapshot?.settings.model;
   const savedDevice = snapshot?.settings.input_device;
   const savedAutoPaste = snapshot?.settings.auto_paste;
+  const savedPasteShortcut = snapshot?.settings.paste_shortcut;
   useEffect(() => {
     if (savedShortcut === undefined || savedModel === undefined || savedDevice === undefined
-      || savedAutoPaste === undefined) return;
+      || savedAutoPaste === undefined || savedPasteShortcut === undefined) return;
     setDraft({
       shortcut: savedShortcut, model: savedModel, input_device: savedDevice, auto_paste: savedAutoPaste,
+      paste_shortcut: savedPasteShortcut,
     });
     setManualModel(!MODELS.some((model) => model.value === savedModel));
     setSettingsError(null);
-  }, [savedShortcut, savedModel, savedDevice, savedAutoPaste]);
+  }, [savedShortcut, savedModel, savedDevice, savedAutoPaste, savedPasteShortcut]);
 
   useEffect(() => {
     if (!feedback) return;
@@ -209,9 +211,9 @@ export default function App() {
         <textarea id="transcript" className="transcript" readOnly rows={7}
           value={snapshot?.last_transcript ?? ''} placeholder="Здесь появится распознанный текст."
           aria-describedby="transcript-help" />
-        <p className="help" id="transcript-help">{mac && snapshot?.settings.auto_paste
-          ? 'При диктовке через hotkey текст автоматически вставляется в активное поле и остаётся в буфере обмена.'
-          : 'Текст копируется в буфер обмена — вставьте его сочетанием Cmd+V или Ctrl+V.'}</p>
+        <p className="help" id="transcript-help">{(mac || linux) && snapshot?.settings.auto_paste
+          ? 'При записи, начатой глобальным hotkey и остановленной hotkey или автоматически по лимиту, текст автоматически вставляется в активное поле на момент завершения распознавания и остаётся в буфере обмена.'
+          : 'Текст копируется в буфер обмена — вставьте его рабочим для целевого поля сочетанием: Cmd+V на macOS, Ctrl+V или Ctrl+Shift+V на Linux.'}</p>
       </section>
 
       <div className="settings-grid">
@@ -274,15 +276,37 @@ export default function App() {
                     ? 'После сохранения приложение создаст или обновит своё системное сочетание в GNOME. Чужие сочетания не перезаписываются.'
                     : 'После сохранения приложение зарегистрирует сочетание в системе.'}</p>
               </div>
-              {mac && (
+              {(mac || linux) && (
                 <div className="field checkbox-field">
                   <label className="checkbox-label" htmlFor="auto-paste">
-                    <input id="auto-paste" type="checkbox" checked={draft.auto_paste}
+                    <input id="auto-paste" type="checkbox" checked={draft.auto_paste} aria-describedby="auto-paste-help"
                       onChange={(event) => updateDraft('auto_paste', event.target.checked)} />
                     <span>Автоматически вставлять результат</span>
                   </label>
-                  <p className="help">Работает для записи, начатой глобальным hotkey. macOS запросит
-                    разрешение «Универсальный доступ»; при отказе текст всё равно останется в буфере обмена.</p>
+                  <p className="help" id="auto-paste-help">По умолчанию выключено. Работает только для записи,
+                    начатой глобальным hotkey и остановленной hotkey или автоматически по лимиту.
+                    Кнопка и меню трея только копируют текст. Не переключайте фокус: вставка идёт
+                    в активное поле на момент завершения распознавания. {mac
+                      ? 'macOS запросит разрешение «Универсальный доступ» для Cmd+V; при отказе текст всё равно останется в буфере обмена.'
+                      : <>{systemHotkey
+                        ? 'Wayland: нужен ydotool; для современного ydotool 1.x самостоятельно настройте демон, доступ к uinput и сокету по инструкции вашего дистрибутива. YDOTOOL_SOCKET наследуется из окружения приложения. Пакет Ubuntu 22.04 может быть устаревшим.'
+                        : 'X11: нужен xdotool в PATH.'} Приложение не запускает sudo и не настраивает службы.
+                        При ошибке или тайм-ауте 5 секунд текст остаётся в буфере обмена.</>}</p>
+                </div>
+              )}
+              {linux && (
+                <div className="field">
+                  <label htmlFor="paste-shortcut">Сочетание для вставки</label>
+                  <select id="paste-shortcut" value={draft.paste_shortcut} disabled={!draft.auto_paste}
+                    aria-describedby="paste-shortcut-help"
+                    onChange={(event) => updateDraft('paste_shortcut', event.target.value as Settings['paste_shortcut'])}>
+                    <option value="ctrl_v">Ctrl+V</option>
+                    <option value="ctrl_shift_v">Ctrl+Shift+V</option>
+                  </select>
+                  <p className="help" id="paste-shortcut-help">По умолчанию Ctrl+V. Выберите сочетание, которое
+                    работает вручную в целевом поле. Ctrl+Shift+V может подойти для вставки обычного текста
+                    в чат Zed или в терминал — проверьте конкретное поле. Выбор один для всех приложений:
+                    приложение не определяет цель и не пробует второе сочетание после первого.</p>
                 </div>
               )}
               <button className="button button-secondary" type="submit" disabled={!settingsChanged && !systemHotkey}>

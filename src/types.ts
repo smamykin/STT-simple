@@ -5,6 +5,7 @@ export interface Settings {
   model: string;
   input_device: string | null;
   auto_paste: boolean;
+  paste_shortcut: 'ctrl_v' | 'ctrl_shift_v';
 }
 
 export interface Statistics {

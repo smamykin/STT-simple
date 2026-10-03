@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
 import { useAppState } from './useAppState';
 import { deferred, makeSnapshot } from './testFixtures';
-import type { Snapshot } from './types';
+import type { Settings, Snapshot } from './types';
 import { MODELS } from './utils';
 
 const backend = vi.hoisted(() => ({
@@ -138,8 +138,8 @@ describe('Russian dictation interface', () => {
   it('saves normalized settings and maps the default microphone to null', async () => {
     const original = makeSnapshot({ settings: { ...makeSnapshot().settings, input_device: 'mic-1' } });
     await mount(original);
-    const settings = {
-      shortcut: 'Control+Super+R', model: 'whisper-1', input_device: null, auto_paste: false,
+    const settings: Settings = {
+      shortcut: 'Control+Super+R', model: 'whisper-1', input_device: null, auto_paste: false, paste_shortcut: 'ctrl_v',
     };
     const saved = makeSnapshot({ settings });
     backend.saveSettings.mockResolvedValue(saved);
@@ -156,11 +156,14 @@ describe('Russian dictation interface', () => {
     vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(
       'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/605.1.15',
     );
-    await mount();
+    const initial = makeSnapshot({ settings: { ...makeSnapshot().settings, paste_shortcut: 'ctrl_shift_v' } });
+    await mount(initial);
+    expect(screen.queryByLabelText('Сочетание для вставки')).toBeNull();
+    expect(screen.getByText(/для Cmd\+V/)).toBeTruthy();
     const autoPaste = screen.getByLabelText('Автоматически вставлять результат');
     expect(autoPaste).toHaveProperty('checked', false);
     expect(screen.getByText(/разрешение «Универсальный доступ»/)).toBeTruthy();
-    const saved = makeSnapshot({ settings: { ...makeSnapshot().settings, auto_paste: true } });
+    const saved = makeSnapshot({ settings: { ...initial.settings, auto_paste: true } });
     backend.saveSettings.mockResolvedValue(saved);
     backend.getSnapshot.mockResolvedValue(saved);
     fireEvent.click(autoPaste);
@@ -169,10 +172,94 @@ describe('Russian dictation interface', () => {
     expect(screen.getByText(/автоматически вставляется в активное поле/)).toBeTruthy();
   });
 
-  it('does not offer macOS auto-paste on Linux', async () => {
+  it.each(['native', 'system'] as const)('offers opt-in Linux auto-paste in %s mode and persists both choices', async (hotkey_mode) => {
+    // Wayland webviews can also identify themselves as X11: use the backend mode.
     vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (X11; Linux x86_64)');
-    await mount();
+    const initial = makeSnapshot({ hotkey_mode });
+    await mount(initial);
+    const autoPaste = screen.getByLabelText('Автоматически вставлять результат');
+    expect(autoPaste).toHaveProperty('checked', false);
+    const help = document.getElementById(autoPaste.getAttribute('aria-describedby')!)!;
+    expect(help.textContent).toContain(hotkey_mode === 'system' ? 'Wayland: нужен ydotool' : 'X11: нужен xdotool');
+    expect(help.textContent).not.toContain(hotkey_mode === 'system' ? 'xdotool' : 'ydotool');
+    expect(help.textContent).not.toContain('Универсальный доступ');
+    expect(help.textContent).toContain('остановленной hotkey или автоматически по лимиту');
+    expect(help.textContent).toContain('Кнопка и меню трея только копируют текст');
+    const pasteShortcut = screen.getByLabelText('Сочетание для вставки');
+    expect(pasteShortcut).toHaveProperty('value', 'ctrl_v');
+    expect(pasteShortcut.matches(':disabled')).toBe(true);
+    expect(screen.getByText(/Выбор один для всех приложений/)).toBeTruthy();
+    expect(help.textContent).toContain('тайм-ауте 5 секунд');
+    if (hotkey_mode === 'system') {
+      expect(help.textContent).toContain('демон, доступ к uinput и сокету');
+      expect(help.textContent).toContain('YDOTOOL_SOCKET');
+      expect(help.textContent).toContain('Ubuntu 22.04 может быть устаревшим');
+    }
+    fireEvent.click(autoPaste);
+    expect(pasteShortcut.matches(':disabled')).toBe(false);
+    // Transcript guidance follows saved settings, not an unsaved draft.
+    expect(screen.getByText(/Текст копируется в буфер обмена —/)).toBeTruthy();
+    const saved = { ...initial, settings: { ...initial.settings, auto_paste: true } };
+    backend.saveSettings.mockResolvedValue(saved);
+    backend.getSnapshot.mockResolvedValue(saved);
+    fireEvent.click(screen.getByRole('button', { name: 'Сохранить настройки' }));
+    await waitFor(() => expect(backend.saveSettings).toHaveBeenCalledExactlyOnceWith(saved.settings));
+    await screen.findByText(/автоматически вставляется в активное поле на момент завершения/);
+    await waitFor(() => expect(autoPaste.matches(':disabled')).toBe(false));
+    // Treat disabling as a separate save, outside the double-click guard.
+    vi.spyOn(performance, 'now').mockReturnValue(performance.now() + 1000);
+    backend.saveSettings.mockResolvedValue(initial);
+    backend.getSnapshot.mockResolvedValue(initial);
+    fireEvent.click(autoPaste);
+    fireEvent.click(screen.getByRole('button', { name: 'Сохранить настройки' }));
+    await waitFor(() => expect(backend.saveSettings).toHaveBeenLastCalledWith(initial.settings));
+    await screen.findByText(/Текст копируется в буфер обмена —/);
+  });
+
+  it.each(['ctrl_v', 'ctrl_shift_v'] as const)('loads, edits and saves Linux paste chord %s without losing it when disabled', async (paste_shortcut) => {
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (X11; Linux x86_64)');
+    const initial = makeSnapshot({ settings: { ...makeSnapshot().settings, auto_paste: true, paste_shortcut } });
+    await mount(initial);
+    const select = screen.getByLabelText('Сочетание для вставки');
+    const save = screen.getByRole('button', { name: 'Сохранить настройки' });
+    expect(select).toHaveProperty('value', paste_shortcut);
+    expect(save).toHaveProperty('disabled', true);
+    const next: Settings['paste_shortcut'] = paste_shortcut === 'ctrl_v' ? 'ctrl_shift_v' : 'ctrl_v';
+    fireEvent.change(select, { target: { value: next } });
+    expect(save).toHaveProperty('disabled', false);
+    emit({ ...initial, recording_seconds: 1 });
+    expect(select).toHaveProperty('value', next);
+    fireEvent.click(screen.getByLabelText('Автоматически вставлять результат'));
+    expect(select.matches(':disabled')).toBe(true);
+    const saved = makeSnapshot({ settings: { ...initial.settings, auto_paste: false, paste_shortcut: next } });
+    const saving = deferred<Snapshot>();
+    backend.saveSettings.mockReturnValue(saving.promise);
+    backend.getSnapshot.mockResolvedValue(saved);
+    fireEvent.click(save);
+    expect(backend.saveSettings).toHaveBeenCalledExactlyOnceWith(saved.settings);
+    expect(screen.getByLabelText('Автоматически вставлять результат').matches(':disabled')).toBe(true);
+    await act(async () => saving.resolve(saved));
+    await screen.findByText('Настройки сохранены.');
+    expect(select).toHaveProperty('value', next);
+    expect(save).toHaveProperty('disabled', true);
+    // A settings-only backend update must refresh the draft too.
+    emit({ ...saved, settings: { ...saved.settings, paste_shortcut } });
+    expect(select).toHaveProperty('value', paste_shortcut);
+  });
+
+  it.each(['recording', 'transcribing', 'polishing'] as const)('locks Linux auto-paste during %s', async (phase) => {
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (X11; Linux x86_64)');
+    await mount(makeSnapshot({ phase, settings: { ...makeSnapshot().settings, auto_paste: true } }));
+    expect(screen.getByLabelText('Автоматически вставлять результат').matches(':disabled')).toBe(true);
+    expect(screen.getByLabelText('Сочетание для вставки').matches(':disabled')).toBe(true);
+  });
+
+  it.each(['Mozilla/5.0 (Windows NT 10.0; Win64; x64)', 'Mozilla/5.0 (Linux; Android 14)'])('hides auto-paste on unsupported platform %s', async (userAgent) => {
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(userAgent);
+    await mount(makeSnapshot({ settings: { ...makeSnapshot().settings, auto_paste: true } }));
     expect(screen.queryByLabelText('Автоматически вставлять результат')).toBeNull();
+    expect(screen.queryByLabelText('Сочетание для вставки')).toBeNull();
+    expect(screen.getByText(/Текст копируется в буфер обмена —/)).toBeTruthy();
   });
 
   it('saves the password transiently and clears it as soon as the backend accepts it', async () => {
