@@ -1,4 +1,4 @@
-use crate::StoredData;
+use crate::{shortcuts_are_equivalent, StoredData};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -14,8 +14,19 @@ pub fn load_data(path: &Path) -> Result<StoredData, String> {
         }
         Err(error) => return Err(format!("Не удалось прочитать файл настроек: {error}")),
     };
-    let data: StoredData = serde_json::from_slice(&bytes)
+    let value: serde_json::Value = serde_json::from_slice(&bytes)
         .map_err(|_| "Файл настроек повреждён. Восстановите его из резервной копии или удалите, чтобы сбросить настройки.".to_owned())?;
+    let has_tts_shortcut = value
+        .get("settings")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|settings| settings.contains_key("tts_shortcut"));
+    let mut data: StoredData = serde_json::from_value(value)
+        .map_err(|_| "Файл настроек повреждён. Восстановите его из резервной копии или удалите, чтобы сбросить настройки.".to_owned())?;
+    if !has_tts_shortcut
+        && shortcuts_are_equivalent(&data.settings.shortcut, &data.settings.tts_shortcut)
+    {
+        data.settings.tts_shortcut = "Control+Super+4".into();
+    }
     validate_data(&data)?;
     Ok(data)
 }
@@ -210,6 +221,28 @@ mod tests {
             let restored = load_data(&path).unwrap();
             assert_eq!(restored.settings, Settings::default());
             assert_eq!(restored.statistics.total_recording_seconds, 0.0);
+        }
+    }
+
+    #[test]
+    fn legacy_tts_shortcut_conflict_is_migrated_but_explicit_conflict_is_rejected() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("settings.json");
+
+        for shortcut in ["Super+Control+A", "cMd+cTrL+a"] {
+            let json = serde_json::json!({ "settings": { "shortcut": shortcut } });
+            fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+            let data = load_data(&path).unwrap();
+            assert_eq!(data.settings.shortcut, shortcut);
+            assert_eq!(data.settings.tts_shortcut, "Control+Super+4");
+        }
+
+        for json in [
+            r#"{"settings":{"shortcut":"ctrl+command+a","tts_shortcut":"Super+Control+A"}}"#,
+            r#"{"settings":{"shortcut":"Control++A","tts_shortcut":"  Control++A  "}}"#,
+        ] {
+            fs::write(&path, json).unwrap();
+            assert!(load_data(&path).is_err());
         }
     }
 

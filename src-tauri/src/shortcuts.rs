@@ -1,4 +1,5 @@
 use crate::{clipboard, state::Runtime};
+use std::collections::HashSet;
 use std::str::FromStr;
 use stt_core::Settings;
 use tauri::{AppHandle, Manager};
@@ -36,30 +37,143 @@ fn verify_system(shortcut: &str) -> Result<(), String> {
     }
 }
 
+pub fn validate_pair(settings: &Settings) -> Result<[Shortcut; 2], String> {
+    let pair = [
+        validate(&settings.shortcut)?,
+        validate(&settings.tts_shortcut)?,
+    ];
+    if pair[0] == pair[1] {
+        return Err("Сочетания клавиш распознавания и озвучивания не должны совпадать.".into());
+    }
+    Ok(pair)
+}
+
+pub fn wayland_tts_command() -> String {
+    wayland_command()
+        .strip_suffix(" --toggle")
+        .map(|exe| format!("{exe} --toggle-tts"))
+        .unwrap_or_else(|| "stt-simple --toggle-tts".into())
+}
+
+pub fn update_tts_status(app: &AppHandle) {
+    let runtime = app.state::<Runtime>();
+    let mut data = runtime.data.lock().expect("application state poisoned");
+    if clipboard::is_wayland() {
+        data.tts_hotkey_available = false;
+        data.tts_hotkey_command = Some(wayland_tts_command());
+        data.tts_hotkey_message = Some("Назначьте команду озвучивания вручную в системных сочетаниях клавиш. TTS на Linux не проверен.".into());
+    } else {
+        data.tts_hotkey_available = true;
+        data.tts_hotkey_command = None;
+        data.tts_hotkey_message = None;
+    }
+}
+
+pub fn retain_pressed(pressed: &mut HashSet<Shortcut>, pair: &[Shortcut; 2]) {
+    pressed.retain(|shortcut| pair.contains(shortcut));
+}
+
+trait Registrations {
+    fn contains(&self, shortcut: Shortcut) -> bool;
+    fn register(&self, shortcut: Shortcut) -> Result<(), ()>;
+    fn unregister(&self, shortcut: Shortcut) -> Result<(), ()>;
+}
+
+struct NativeRegistrations<'a>(&'a AppHandle);
+impl Registrations for NativeRegistrations<'_> {
+    fn contains(&self, shortcut: Shortcut) -> bool {
+        self.0.global_shortcut().is_registered(shortcut)
+    }
+    fn register(&self, shortcut: Shortcut) -> Result<(), ()> {
+        self.0.global_shortcut().register(shortcut).map_err(|_| ())
+    }
+    fn unregister(&self, shortcut: Shortcut) -> Result<(), ()> {
+        self.0
+            .global_shortcut()
+            .unregister(shortcut)
+            .map_err(|_| ())
+    }
+}
+
+fn registration_error(message: &str, degraded: bool) -> String {
+    if degraded {
+        format!("{message} Откат регистрации не завершён; сочетания могут работать некорректно. После успешного сохранения настроек перезапустите приложение для восстановления регистрации.")
+    } else {
+        message.into()
+    }
+}
+
+// The same transaction is used for initialization and replacement; swaps acquire nothing.
+fn replace_native(
+    manager: &impl Registrations,
+    old: &[Shortcut],
+    new: &[Shortcut; 2],
+) -> Result<(), String> {
+    let mut added = Vec::new();
+    for &shortcut in new {
+        if !manager.contains(shortcut) {
+            if manager.register(shortcut).is_err() {
+                let mut degraded = false;
+                for &added in added.iter().rev() {
+                    degraded |= manager.unregister(added).is_err();
+                }
+                return Err(registration_error(
+                    "Новое сочетание недоступно или занято. Прежние настройки сохранены.",
+                    degraded,
+                ));
+            }
+            added.push(shortcut);
+        }
+    }
+    let mut removed = Vec::new();
+    for &shortcut in old {
+        if !new.contains(&shortcut) && manager.contains(shortcut) {
+            if manager.unregister(shortcut).is_err() {
+                let mut degraded = false;
+                for removed in removed {
+                    degraded |= manager.register(removed).is_err();
+                }
+                for &added in added.iter().rev() {
+                    degraded |= manager.unregister(added).is_err();
+                }
+                return Err(registration_error(
+                    "Не удалось освободить прежнее сочетание. Настройки не изменены.",
+                    degraded,
+                ));
+            }
+            removed.push(shortcut);
+        }
+    }
+    Ok(())
+}
+
 pub fn initialize(app: &AppHandle) {
     let runtime = app.state::<Runtime>();
     let settings = runtime.snapshot().settings;
-    let (available, message) = if clipboard::is_wayland() {
-        match verify_system(&settings.shortcut) {
-            Ok(()) => (true, None),
-            Err(error) => (false, Some(error)),
-        }
+    update_tts_status(app);
+    let results = if clipboard::is_wayland() {
+        [verify_system(&settings.shortcut), Ok(())]
     } else {
-        match validate(&settings.shortcut).and_then(|shortcut| {
-            app.global_shortcut().register(shortcut).map_err(|_| "Не удалось зарегистрировать сочетание: оно может быть занято или запрещено системой.".to_owned())
-        }) {
-            Ok(()) => (true, None),
-            Err(error) => (false, Some(error)),
+        match validate_pair(&settings) {
+            Ok(pair) => match replace_native(&NativeRegistrations(app), &[], &pair) {
+                Ok(()) => [Ok(()), Ok(())],
+                Err(error) => [Err(error.clone()), Err(error)],
+            },
+            Err(error) => [Err(error.clone()), Err(error)],
         }
     };
     let mut data = runtime.data.lock().expect("application state poisoned");
-    data.hotkey_available = available;
-    data.hotkey_message = message;
+    data.hotkey_available = results[0].is_ok();
+    data.hotkey_message = results[0].as_ref().err().cloned();
+    if !clipboard::is_wayland() {
+        data.tts_hotkey_available = results[1].is_ok();
+        data.tts_hotkey_message = results[1].as_ref().err().cloned();
+    }
 }
 
-// Register the replacement before releasing the old shortcut so conflicts do not break it.
+// Acquire the entire new pair before releasing any old registration, including swaps.
 pub async fn replace(app: &AppHandle, old: &Settings, new: &Settings) -> Result<(), String> {
-    let new_shortcut = validate(&new.shortcut)?;
+    let new_pair = validate_pair(new)?;
     if clipboard::is_wayland() {
         #[cfg(target_os = "linux")]
         {
@@ -71,29 +185,176 @@ pub async fn replace(app: &AppHandle, old: &Settings, new: &Settings) -> Result<
         #[cfg(not(target_os = "linux"))]
         return Err("Автоматическая настройка GNOME поддерживается только на Linux.".into());
     }
-    let manager = app.global_shortcut();
-    let old_shortcut = validate(&old.shortcut)
-        .ok()
-        .filter(|shortcut| manager.is_registered(*shortcut));
-    if old_shortcut == Some(new_shortcut) {
-        return Ok(());
+    let old_pair: Vec<_> = [&old.shortcut, &old.tts_shortcut]
+        .into_iter()
+        .filter_map(|value| validate(value).ok())
+        .collect();
+    replace_native(&NativeRegistrations(app), &old_pair, &new_pair)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    #[derive(Default)]
+    struct FakeRegistrations {
+        held: RefCell<HashSet<Shortcut>>,
+        failures: RefCell<Vec<(bool, Shortcut)>>,
+        calls: RefCell<Vec<(bool, Shortcut)>>,
     }
-    let new_was_registered = manager.is_registered(new_shortcut);
-    if !new_was_registered {
-        manager.register(new_shortcut).map_err(|_| {
-            "Новое сочетание недоступно или занято. Выберите другое; прежние настройки сохранены.".to_owned()
-        })?;
-    }
-    if let Some(old_shortcut) = old_shortcut {
-        if manager.unregister(old_shortcut).is_err() {
-            if !new_was_registered && manager.unregister(new_shortcut).is_err() {
-                return Err("Не удалось удалить прежнее и новое сочетания. Перезапустите приложение для восстановления регистрации.".into());
-            }
-            return Err(
-                "Не удалось освободить прежнее сочетание. Настройки не изменены; попробуйте снова."
-                    .into(),
-            );
+    impl Registrations for FakeRegistrations {
+        fn contains(&self, shortcut: Shortcut) -> bool {
+            self.held.borrow().contains(&shortcut)
+        }
+        fn register(&self, shortcut: Shortcut) -> Result<(), ()> {
+            self.apply(true, shortcut)
+        }
+        fn unregister(&self, shortcut: Shortcut) -> Result<(), ()> {
+            self.apply(false, shortcut)
         }
     }
-    Ok(())
+    impl FakeRegistrations {
+        fn apply(&self, register: bool, shortcut: Shortcut) -> Result<(), ()> {
+            let call = (register, shortcut);
+            self.calls.borrow_mut().push(call);
+            let mut failures = self.failures.borrow_mut();
+            if failures.first() == Some(&call) {
+                failures.remove(0);
+                return Err(());
+            }
+            if register {
+                self.held.borrow_mut().insert(shortcut);
+            } else {
+                self.held.borrow_mut().remove(&shortcut);
+            }
+            Ok(())
+        }
+    }
+    fn pair(a: &str, b: &str) -> [Shortcut; 2] {
+        [validate(a).unwrap(), validate(b).unwrap()]
+    }
+
+    #[test]
+    fn initial_pair_failure_rolls_back_only_acquired_shortcuts() {
+        let new = pair("Control+Super+A", "Control+Super+B");
+        let manager = FakeRegistrations::default();
+        manager.failures.borrow_mut().push((true, new[1]));
+        assert!(replace_native(&manager, &[], &new).is_err());
+        assert!(manager.held.borrow().is_empty());
+        assert_eq!(
+            *manager.calls.borrow(),
+            vec![(true, new[0]), (true, new[1]), (false, new[0])]
+        );
+        manager.held.borrow_mut().insert(new[0]);
+        manager.calls.borrow_mut().clear();
+        manager.failures.borrow_mut().push((true, new[1]));
+        assert!(replace_native(&manager, &[], &new).is_err());
+        assert!(manager.contains(new[0]));
+        assert_eq!(*manager.calls.borrow(), vec![(true, new[1])]);
+    }
+
+    #[test]
+    fn registration_failure_reports_cleanup_failure_without_releasing_old_pair() {
+        let old = pair("Control+Super+R", "Control+Super+T");
+        let new = pair("Control+Super+A", "Control+Super+B");
+        let manager = FakeRegistrations::default();
+        manager.held.borrow_mut().extend(old);
+        manager
+            .failures
+            .borrow_mut()
+            .extend([(true, new[1]), (false, new[0])]);
+        let error = replace_native(&manager, &old, &new).unwrap_err();
+        assert!(error.contains("Откат регистрации не завершён"));
+        assert!(error.contains("перезапустите"));
+        assert!(old.iter().all(|shortcut| manager.contains(*shortcut)));
+    }
+
+    #[test]
+    fn initial_pair_cleanup_failure_reports_degraded() {
+        let new = pair("Control+Super+A", "Control+Super+B");
+        let manager = FakeRegistrations::default();
+        manager
+            .failures
+            .borrow_mut()
+            .extend([(true, new[1]), (false, new[0])]);
+        assert!(replace_native(&manager, &[], &new)
+            .unwrap_err()
+            .contains("Откат регистрации не завершён"));
+    }
+
+    #[test]
+    fn replacements_acquire_before_release_and_swaps_do_not_reregister() {
+        let old = pair("Control+Super+R", "Control+Super+T");
+        let new = pair("Control+Super+A", "Control+Super+B");
+        let manager = FakeRegistrations::default();
+        manager.held.borrow_mut().extend(old);
+        replace_native(&manager, &old, &new).unwrap();
+        assert_eq!(
+            *manager.calls.borrow(),
+            vec![
+                (true, new[0]),
+                (true, new[1]),
+                (false, old[0]),
+                (false, old[1])
+            ]
+        );
+        manager.calls.borrow_mut().clear();
+        replace_native(&manager, &new, &[new[1], new[0]]).unwrap();
+        assert!(manager.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn release_failure_restores_removed_old_and_cleans_new_pair() {
+        let old = pair("Control+Super+R", "Control+Super+T");
+        let new = pair("Control+Super+A", "Control+Super+B");
+        let manager = FakeRegistrations::default();
+        manager.held.borrow_mut().extend(old);
+        manager.failures.borrow_mut().push((false, old[1]));
+        assert!(replace_native(&manager, &old, &new).is_err());
+        assert_eq!(*manager.held.borrow(), HashSet::from(old));
+    }
+
+    #[test]
+    fn release_rollback_checks_all_restoration_and_cleanup_errors() {
+        let old = pair("Control+Super+R", "Control+Super+T");
+        let new = pair("Control+Super+A", "Control+Super+B");
+        let manager = FakeRegistrations::default();
+        manager.held.borrow_mut().extend(old);
+        manager
+            .failures
+            .borrow_mut()
+            .extend([(false, old[1]), (true, old[0]), (false, new[1])]);
+        assert!(replace_native(&manager, &old, &new)
+            .unwrap_err()
+            .contains("Откат регистрации не завершён"));
+        assert_eq!(manager.calls.borrow().last(), Some(&(false, new[0])));
+        assert!(manager.failures.borrow().is_empty());
+    }
+
+    #[test]
+    fn settings_save_retains_held_edges_for_unchanged_and_swapped_shortcuts() {
+        let old = pair("Control+Super+R", "Control+Super+A");
+        let mut pressed = HashSet::from(old);
+        retain_pressed(&mut pressed, &[old[1], old[0]]);
+        assert_eq!(pressed.len(), 2);
+        let new = pair("Control+Super+R", "Control+Super+B");
+        retain_pressed(&mut pressed, &new);
+        assert_eq!(pressed, HashSet::from([old[0]]));
+        assert!(!pressed.insert(old[0]));
+        assert!(pressed.insert(new[1]));
+    }
+
+    #[test]
+    fn parses_tts_and_rejects_equivalent_shortcuts() {
+        assert!(validate("Control+Super+A").is_ok());
+        let mut settings = Settings::default();
+        settings.shortcut = "Super+Control+A".into();
+        assert!(validate_pair(&settings).is_err());
+    }
+    #[test]
+    fn wayland_commands_use_distinct_actions() {
+        assert!(wayland_command().ends_with(" --toggle"));
+        assert!(wayland_tts_command().ends_with(" --toggle-tts"));
+    }
 }

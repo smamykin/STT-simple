@@ -16,6 +16,7 @@ describe('Tauri command contract', () => {
       [backend.listInputDevices, 'list_input_devices'],
       [backend.deleteApiKey, 'delete_api_key'],
       [backend.toggleRecording, 'toggle_recording'],
+      [backend.toggleSpeech, 'toggle_speech'],
       [backend.cancelRecording, 'cancel_recording'],
       [backend.resetStatistics, 'reset_statistics'],
       [backend.copyLastTranscript, 'copy_last_transcript'],

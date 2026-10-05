@@ -21,6 +21,7 @@ tauri-plugin-global-shortcut = "2"
 tauri-plugin-clipboard-manager = "2"
 serde = { version = "1", features = ["derive"] }
 cpal = "0.15"
+rodio = { version = "=0.20.1", default-features = false, features = ["wav"] }
 tokio = { version = "1", features = ["sync", "time", "process", "io-util"] }
 zeroize = "1"
 

@@ -1,13 +1,30 @@
 # stt-core
 
-Independent Rust library (`stt_core`), edition 2021, declared minimum Rust
-version 1.77.2. No Tauri, UI, microphone capture, key storage, or text rewriting.
+Independent Rust library (`stt_core`), edition 2021. The manifest still declares
+`rust-version = "1.77.2"`, but strict compatibility with Rust 1.77.2 is not
+claimed: the current workspace lockfile includes dependencies that require a
+newer toolchain, including Edition 2024 dependencies. No Tauri, UI, microphone
+capture, key storage, playback, or text rewriting.
 
 ## Public API
 
-- `Settings { shortcut, model, input_device }` and `Settings::validate()`.
-  Defaults: `Super+R` on Linux (`Control+Super+R` on macOS),
-  `gpt-transcribe` (also exported as `DEFAULT_MODEL`), no selected input device.
+- `Settings { shortcut, model, tts_shortcut, tts_model, tts_voice, input_device, auto_paste }` and
+  `Settings::validate()`. Defaults: `Super+R` on Linux (`Control+Super+R` on macOS),
+  `gpt-transcribe` (also exported as `DEFAULT_MODEL`); `Control+Super+A` for
+  text-to-speech on every platform; `gpt-4o-mini-tts` (`DEFAULT_TTS_MODEL`);
+  and `marin` (`DEFAULT_TTS_VOICE`); no selected input device. Omitted TTS
+  fields in existing persisted settings are serde-defaulted. If an older file
+  lacks `tts_shortcut` and its STT shortcut conflicts with that default, loading
+  migrates its TTS shortcut to `Control+Super+4`; an explicitly persisted
+  conflict remains invalid. Both shortcuts must contain 1–128 characters.
+  Trimmed-identical values always conflict. Otherwise conflict detection treats
+  modifier order, ASCII case, and the aliases
+  `Control`/`Ctrl`, `Alt`/`Option`, `Super`/`Meta`/`Command`/`Cmd`, and `Shift`
+  as equivalent without rewriting persisted shortcuts. Malformed shortcut
+  syntax and duplicate equivalent modifiers have no canonical identity, but
+  trimmed-identical malformed values still conflict. TTS model IDs
+  use the same format rules as transcription IDs; voice IDs use the same ASCII
+  format and have separate validation errors.
   The new model default applies only to new settings or omitted model fields;
   explicitly persisted model IDs remain unchanged, including the previous
   `gpt-4o-mini-transcribe` default.
@@ -46,11 +63,19 @@ version 1.77.2. No Tauri, UI, microphone capture, key storage, or text rewriting
   `native_samples.len() as f64 / native_sample_rate as f64` before resampling.
   Recordings over 600 seconds and uploads over 25 MiB are rejected.
 - `OpenAiClient::new()` and async
-  `transcribe(&self, api_key: &str, model: &str, audio: Vec<u8>)`.
-  Use from a Tokio runtime supplied by the application. The endpoint is fixed
-  to `https://api.openai.com/v1/audio/transcriptions`; requests use a 120-second
-  timeout and never follow redirects. Model IDs are forwarded unchanged with
-  `response_format=json`. For `gpt-4o-transcribe-diarize` and IDs starting with
+  `transcribe(&self, api_key: &str, model: &str, audio: Vec<u8>)`, plus
+  `synthesize(&self, api_key: &str, model: &str, voice: &str, input: &str)`.
+  Synthesis sends JSON to `https://api.openai.com/v1/audio/speech` with
+  `model`, `voice`, original (untrimmed) `input`, and `response_format="wav"`.
+  Empty/whitespace input and input over `MAX_TTS_INPUT_CHARS = 4096` Unicode
+  characters are rejected before network access; streamed WAV output is capped
+  at 64 MiB. TTS-specific 400 and 404 errors identify the synthesis request,
+  model, or voice without exposing API response data.
+  Use from a Tokio runtime supplied by the application. Requests use the fixed
+  transcription endpoint `https://api.openai.com/v1/audio/transcriptions` or
+  speech endpoint `https://api.openai.com/v1/audio/speech`, a 120-second timeout,
+  and never follow redirects. Transcription model IDs are forwarded unchanged
+  with `response_format=json`. For `gpt-4o-transcribe-diarize` and IDs starting with
   `gpt-4o-transcribe-diarize-`, requests also send `chunking_strategy=auto` to
   support audio longer than 30 seconds. Other model IDs omit that parameter.
   The [official transcription API reference](https://developers.openai.com/api/reference/resources/audio/subresources/transcriptions/methods/create)
@@ -58,9 +83,10 @@ version 1.77.2. No Tauri, UI, microphone capture, key storage, or text rewriting
   requested. The returned `text` is only trimmed at its boundaries: no
   translation, polish, prompts, or additional model calls. No model-list API is
   called, and future model compatibility is left to OpenAI.
-  Audio and the bearer key are sent directly to OpenAI; this requires internet
+  Transcription sends audio and the bearer key directly to OpenAI; synthesis
+  sends input text and the bearer key directly to OpenAI. This requires internet
   access and an API key. Russian errors do not echo response bodies, keys,
-  audio, or transcripts. Only `error.code == "insufficient_quota"` selects the
+  audio, TTS input, or transcripts. Only `error.code == "insufficient_quota"` selects the
   quota-specific HTTP 429 message; other 429 responses use rate-limit guidance.
   HTTP 404 returns model-unavailable/not-found guidance without exposing the
   API response or model ID.
@@ -70,19 +96,24 @@ version 1.77.2. No Tauri, UI, microphone capture, key storage, or text rewriting
 From this directory:
 
 ```sh
-cargo fmt -p stt-core --check
+cargo fmt --all --check
 cargo test -p stt-core --locked
 ```
 
-Tests cover defaults, manual/snapshot model-ID validation and preservation of
-persisted model IDs, statistical accumulation and bounds,
+Tests cover defaults and backward-compatible serde for TTS fields, canonical
+STT/TTS shortcut conflict detection and legacy migration, model and voice
+validation, manual/snapshot model-ID validation and
+preservation of persisted model IDs, statistical accumulation and bounds,
 persistence roundtrip/corruption/forward-compatible defaults/failed writes,
 normal save outcomes and committed saves with simulated directory-sync warnings,
 WAV sample sanitization and resampling, and local TCP HTTP mocks for multipart
 authentication, unchanged model forwarding, diarization-only automatic
 chunking, plain JSON transcription, safe model-unavailable HTTP 404 guidance,
 other status errors, quota/rate-limit errors,
-redirect refusal, timeouts, invalid input, and malformed/oversized responses.
+redirect refusal, timeouts, invalid input, and malformed/oversized responses,
+as well as local JSON/WAV synthesis requests, 4096-character input limits,
+the production 64 MiB streamed WAV limit (tested with a small test-only limit),
+and synthesis-safe HTTP errors.
 No real API key or external HTTP service is needed for tests. Dependency
 resolution still needs downloaded crates, and building requires a compatible
 Rust toolchain and platform linker.

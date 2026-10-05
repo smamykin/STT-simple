@@ -15,12 +15,18 @@ pub const MAX_RECORDING_SECONDS: u64 = 600;
 
 pub(crate) const MAX_AUDIO_BYTES: usize = 25 * 1024 * 1024;
 pub const DEFAULT_MODEL: &str = "gpt-transcribe";
+pub const DEFAULT_TTS_MODEL: &str = "gpt-4o-mini-tts";
+pub const DEFAULT_TTS_VOICE: &str = "marin";
+pub const MAX_TTS_INPUT_CHARS: usize = 4096;
 
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 #[serde(default)]
 pub struct Settings {
     pub shortcut: String,
     pub model: String,
+    pub tts_shortcut: String,
+    pub tts_model: String,
+    pub tts_voice: String,
     pub input_device: Option<String>,
     pub auto_paste: bool,
 }
@@ -35,6 +41,9 @@ impl Default for Settings {
             }
             .to_owned(),
             model: DEFAULT_MODEL.to_owned(),
+            tts_shortcut: "Control+Super+A".to_owned(),
+            tts_model: DEFAULT_TTS_MODEL.to_owned(),
+            tts_voice: DEFAULT_TTS_VOICE.to_owned(),
             input_device: None,
             auto_paste: false,
         }
@@ -44,8 +53,19 @@ impl Default for Settings {
 impl Settings {
     pub fn validate(&self) -> Result<(), String> {
         validate_model(&self.model)?;
-        if self.shortcut.trim().is_empty() || self.shortcut.chars().count() > 128 {
-            return Err("Укажите сочетание клавиш длиной от 1 до 128 символов.".into());
+        validate_model(&self.tts_model)
+            .map_err(|_| "Некорректный идентификатор TTS-модели. Используйте от 1 до 128 ASCII-символов: первая буква или цифра, далее буквы, цифры и . _ - : без пробелов.".to_owned())?;
+        validate_voice(&self.tts_voice)?;
+        validate_shortcut(
+            &self.shortcut,
+            "Укажите сочетание клавиш распознавания длиной от 1 до 128 символов.",
+        )?;
+        validate_shortcut(
+            &self.tts_shortcut,
+            "Укажите сочетание клавиш озвучивания длиной от 1 до 128 символов.",
+        )?;
+        if shortcuts_are_equivalent(&self.shortcut, &self.tts_shortcut) {
+            return Err("Сочетания клавиш распознавания и озвучивания не должны совпадать.".into());
         }
         if self
             .input_device
@@ -55,6 +75,66 @@ impl Settings {
             return Err("Идентификатор микрофона не должен превышать 512 символов.".into());
         }
         Ok(())
+    }
+}
+
+fn validate_shortcut(shortcut: &str, error: &str) -> Result<(), String> {
+    if shortcut.trim().is_empty() || shortcut.chars().count() > 128 {
+        return Err(error.into());
+    }
+    Ok(())
+}
+
+pub(crate) fn shortcuts_are_equivalent(left: &str, right: &str) -> bool {
+    if left.trim() == right.trim() {
+        return true;
+    }
+    match (shortcut_identity(left), shortcut_identity(right)) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
+    }
+}
+
+fn shortcut_identity(shortcut: &str) -> Option<(u8, String)> {
+    let mut parts = shortcut.trim().split('+').peekable();
+    let mut modifiers = 0;
+    let mut key = None;
+
+    while let Some(part) = parts.next() {
+        if part.is_empty() || !part.is_ascii() || key.is_some() {
+            return None;
+        }
+        if let Some(modifier) = shortcut_modifier(part) {
+            if parts.peek().is_none() || modifiers & modifier != 0 {
+                return None;
+            }
+            modifiers |= modifier;
+        } else {
+            if parts.peek().is_some() || !part.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+                return None;
+            }
+            key = Some(part.to_ascii_lowercase());
+        }
+    }
+
+    key.map(|key| (modifiers, key))
+}
+
+fn shortcut_modifier(part: &str) -> Option<u8> {
+    if part.eq_ignore_ascii_case("control") || part.eq_ignore_ascii_case("ctrl") {
+        Some(1 << 0)
+    } else if part.eq_ignore_ascii_case("alt") || part.eq_ignore_ascii_case("option") {
+        Some(1 << 1)
+    } else if part.eq_ignore_ascii_case("super")
+        || part.eq_ignore_ascii_case("meta")
+        || part.eq_ignore_ascii_case("command")
+        || part.eq_ignore_ascii_case("cmd")
+    {
+        Some(1 << 2)
+    } else if part.eq_ignore_ascii_case("shift") {
+        Some(1 << 3)
+    } else {
+        None
     }
 }
 
@@ -68,6 +148,19 @@ pub(crate) fn validate_model(model: &str) -> Result<(), String> {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b':'))
     {
         return Err("Некорректный идентификатор модели. Используйте от 1 до 128 ASCII-символов: первая буква или цифра, далее буквы, цифры и . _ - : без пробелов.".into());
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_voice(voice: &str) -> Result<(), String> {
+    let bytes = voice.as_bytes();
+    if !(1..=128).contains(&bytes.len())
+        || !bytes[0].is_ascii_alphanumeric()
+        || !bytes[1..]
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b':'))
+    {
+        return Err("Некорректный идентификатор голоса. Используйте от 1 до 128 ASCII-символов: первая буква или цифра, далее буквы, цифры и . _ - : без пробелов.".into());
     }
     Ok(())
 }
@@ -131,6 +224,12 @@ mod tests {
         let mut settings = Settings::default();
         assert_eq!(DEFAULT_MODEL, "gpt-transcribe");
         assert_eq!(settings.model, DEFAULT_MODEL);
+        assert_eq!(DEFAULT_TTS_MODEL, "gpt-4o-mini-tts");
+        assert_eq!(DEFAULT_TTS_VOICE, "marin");
+        assert_eq!(MAX_TTS_INPUT_CHARS, 4096);
+        assert_eq!(settings.tts_shortcut, "Control+Super+A");
+        assert_eq!(settings.tts_model, DEFAULT_TTS_MODEL);
+        assert_eq!(settings.tts_voice, DEFAULT_TTS_VOICE);
         assert_eq!(settings.input_device, None);
         assert!(!settings.auto_paste);
         assert_eq!(
@@ -209,6 +308,7 @@ mod tests {
         settings.shortcut = " \t\n".into();
         assert!(settings.validate().is_err());
         settings.shortcut = "x".repeat(128);
+        settings.tts_shortcut = "y".repeat(128);
         settings.input_device = Some("я".repeat(512));
         assert!(settings.validate().is_ok());
         settings.shortcut.push('x');
@@ -216,6 +316,77 @@ mod tests {
         settings.shortcut = "Super+R".into();
         settings.input_device.as_mut().unwrap().push('я');
         assert!(settings.validate().is_err());
+    }
+
+    #[test]
+    fn serde_defaults_tts_fields_for_existing_settings() {
+        let settings: Settings =
+            serde_json::from_str(r#"{"shortcut":"Super+R","model":"whisper-1"}"#).unwrap();
+        assert_eq!(settings.tts_shortcut, "Control+Super+A");
+        assert_eq!(settings.tts_model, DEFAULT_TTS_MODEL);
+        assert_eq!(settings.tts_voice, DEFAULT_TTS_VOICE);
+    }
+
+    #[test]
+    fn tts_settings_validation() {
+        let mut settings = Settings::default();
+        settings.tts_shortcut = " ".into();
+        assert!(settings.validate().unwrap_err().contains("озвучивания"));
+        settings.tts_shortcut = "x".repeat(129);
+        assert!(settings.validate().unwrap_err().contains("озвучивания"));
+        settings.tts_shortcut = "Control+Super+A".into();
+        settings.tts_model = "bad/model".into();
+        assert!(settings.validate().unwrap_err().contains("TTS-модели"));
+        settings.tts_model = DEFAULT_TTS_MODEL.into();
+        settings.tts_voice = "bad voice".into();
+        assert!(settings.validate().unwrap_err().contains("голоса"));
+        settings.tts_voice = "я".into();
+        assert!(settings.validate().unwrap_err().contains("голоса"));
+        settings.tts_voice = "voice_1.0:preview".into();
+        settings.shortcut = "  Control+Super+A  ".into();
+        assert!(settings
+            .validate()
+            .unwrap_err()
+            .contains("не должны совпадать"));
+    }
+
+    #[test]
+    fn equivalent_shortcuts_use_modifier_order_case_and_aliases() {
+        let settings = Settings {
+            shortcut: "sUpEr+cTrL+a".into(),
+            tts_shortcut: "CONTROL+command+A".into(),
+            ..Settings::default()
+        };
+        assert!(settings
+            .validate()
+            .unwrap_err()
+            .contains("не должны совпадать"));
+    }
+
+    #[test]
+    fn malformed_shortcuts_have_no_canonical_identity() {
+        for malformed in [
+            "Control+Ctrl+A",
+            "Super+Command+A",
+            "Control++A",
+            "Control+A+Shift",
+            "Control+Key A",
+        ] {
+            assert_eq!(shortcut_identity(malformed), None, "{malformed}");
+        }
+    }
+
+    #[test]
+    fn trimmed_identical_malformed_shortcuts_remain_conflicting() {
+        let settings = Settings {
+            shortcut: "Control++A".into(),
+            tts_shortcut: "  Control++A  ".into(),
+            ..Settings::default()
+        };
+        assert!(settings
+            .validate()
+            .unwrap_err()
+            .contains("не должны совпадать"));
     }
 
     #[test]

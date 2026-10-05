@@ -1,19 +1,25 @@
-use crate::{validate_model, MAX_AUDIO_BYTES};
+use crate::{validate_model, validate_voice, MAX_AUDIO_BYTES, MAX_TTS_INPUT_CHARS};
 use reqwest::header::{HeaderValue, AUTHORIZATION};
 use reqwest::multipart::{Form, Part};
 use reqwest::{Client, Response, StatusCode};
 use serde::Deserialize;
 use std::time::Duration;
 
-const ENDPOINT: &str = "https://api.openai.com/v1/audio/transcriptions";
+const TRANSCRIPTIONS_ENDPOINT: &str = "https://api.openai.com/v1/audio/transcriptions";
+const SPEECH_ENDPOINT: &str = "https://api.openai.com/v1/audio/speech";
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+const MAX_TTS_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 const TIMEOUT_ERROR: &str =
     "OpenAI не ответил вовремя. Проверьте соединение и повторите попытку; при необходимости сократите запись.";
 
 pub struct OpenAiClient {
     client: Client,
     #[cfg(test)]
-    endpoint: String,
+    transcriptions_endpoint: String,
+    #[cfg(test)]
+    speech_endpoint: String,
+    #[cfg(test)]
+    tts_response_limit: usize,
 }
 
 impl OpenAiClient {
@@ -21,12 +27,40 @@ impl OpenAiClient {
         Ok(Self {
             client: build_client(Duration::from_secs(120))?,
             #[cfg(test)]
-            endpoint: ENDPOINT.into(),
+            transcriptions_endpoint: TRANSCRIPTIONS_ENDPOINT.into(),
+            #[cfg(test)]
+            speech_endpoint: SPEECH_ENDPOINT.into(),
+            #[cfg(test)]
+            tts_response_limit: MAX_TTS_RESPONSE_BYTES,
         })
     }
 
     #[cfg(test)]
     fn with_test_endpoint(endpoint: String, timeout: Duration) -> Self {
+        Self::with_test_endpoints(endpoint.clone(), endpoint, timeout)
+    }
+
+    #[cfg(test)]
+    fn with_test_endpoints(
+        transcriptions_endpoint: String,
+        speech_endpoint: String,
+        timeout: Duration,
+    ) -> Self {
+        Self::with_test_endpoints_and_tts_response_limit(
+            transcriptions_endpoint,
+            speech_endpoint,
+            timeout,
+            MAX_TTS_RESPONSE_BYTES,
+        )
+    }
+
+    #[cfg(test)]
+    fn with_test_endpoints_and_tts_response_limit(
+        transcriptions_endpoint: String,
+        speech_endpoint: String,
+        timeout: Duration,
+        tts_response_limit: usize,
+    ) -> Self {
         Self {
             client: Client::builder()
                 .timeout(timeout)
@@ -34,7 +68,9 @@ impl OpenAiClient {
                 .no_proxy()
                 .build()
                 .unwrap(),
-            endpoint,
+            transcriptions_endpoint,
+            speech_endpoint,
+            tts_response_limit,
         }
     }
 
@@ -73,9 +109,9 @@ impl OpenAiClient {
             form = form.text("chunking_strategy", "auto");
         }
         #[cfg(test)]
-        let endpoint = self.endpoint.as_str();
+        let endpoint = self.transcriptions_endpoint.as_str();
         #[cfg(not(test))]
-        let endpoint = ENDPOINT;
+        let endpoint = TRANSCRIPTIONS_ENDPOINT;
         let response = self
             .client
             .post(endpoint)
@@ -86,7 +122,12 @@ impl OpenAiClient {
             .map_err(request_error)?;
         let status = response.status();
         if status == StatusCode::TOO_MANY_REQUESTS {
-            let body = read_body(response).await?;
+            let body = read_body(
+                response,
+                MAX_RESPONSE_BYTES,
+                "Ответ OpenAI слишком большой. Сократите запись и повторите попытку.",
+            )
+            .await?;
             // Only this documented code is inspected; API messages are never surfaced.
             let quota = serde_json::from_slice::<serde_json::Value>(&body)
                 .ok()
@@ -108,7 +149,12 @@ impl OpenAiClient {
         if !status.is_success() {
             return Err(status_error(status));
         }
-        let body = read_body(response).await?;
+        let body = read_body(
+            response,
+            MAX_RESPONSE_BYTES,
+            "Ответ OpenAI слишком большой. Сократите запись и повторите попытку.",
+        )
+        .await?;
         let transcription: Transcription = serde_json::from_slice(&body)
             .map_err(|_| "OpenAI вернул некорректный ответ. Повторите попытку.".to_owned())?;
         let text = transcription.text.trim();
@@ -116,6 +162,92 @@ impl OpenAiClient {
             return Err("Речь не распознана. Проверьте микрофон и повторите запись.".into());
         }
         Ok(text.to_owned())
+    }
+
+    pub async fn synthesize(
+        &self,
+        api_key: &str,
+        model: &str,
+        voice: &str,
+        input: &str,
+    ) -> Result<Vec<u8>, String> {
+        validate_model(model).map_err(|_| {
+            "Некорректный идентификатор TTS-модели. Проверьте настройки озвучивания.".to_owned()
+        })?;
+        validate_voice(voice)?;
+        if input.trim().is_empty() {
+            return Err("Текст для озвучивания пуст. Введите текст и повторите попытку.".into());
+        }
+        if input.chars().count() > MAX_TTS_INPUT_CHARS {
+            return Err(
+                "Текст для озвучивания превышает 4096 символов. Сократите его и повторите попытку."
+                    .into(),
+            );
+        }
+        let api_key = api_key.trim();
+        if api_key.is_empty() {
+            return Err("Добавьте API-ключ OpenAI в настройках.".into());
+        }
+        let mut authorization =
+            HeaderValue::from_str(&format!("Bearer {api_key}")).map_err(|_| {
+                "Недопустимый формат API-ключа. Проверьте ключ в настройках.".to_owned()
+            })?;
+        authorization.set_sensitive(true);
+        #[cfg(test)]
+        let endpoint = self.speech_endpoint.as_str();
+        #[cfg(not(test))]
+        let endpoint = SPEECH_ENDPOINT;
+        let response = self
+            .client
+            .post(endpoint)
+            .header(AUTHORIZATION, authorization)
+            .json(&serde_json::json!({
+                "model": model,
+                "voice": voice,
+                "input": input,
+                "response_format": "wav",
+            }))
+            .send()
+            .await
+            .map_err(request_error)?;
+        let status = response.status();
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            let body = read_body(
+                response,
+                MAX_RESPONSE_BYTES,
+                "Ответ OpenAI слишком большой.",
+            )
+            .await?;
+            let quota = serde_json::from_slice::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("error")?
+                        .get("code")?
+                        .as_str()
+                        .map(|code| code == "insufficient_quota")
+                })
+                .unwrap_or(false);
+            return Err(if quota {
+                "Исчерпана квота OpenAI для озвучивания. Проверьте баланс и лимиты API в аккаунте OpenAI."
+            } else {
+                "Слишком много запросов к OpenAI для озвучивания. Подождите немного и повторите попытку."
+            }
+            .into());
+        }
+        if !status.is_success() {
+            return Err(synthesis_status_error(status));
+        }
+        #[cfg(test)]
+        let tts_response_limit = self.tts_response_limit;
+        #[cfg(not(test))]
+        let tts_response_limit = MAX_TTS_RESPONSE_BYTES;
+        read_body(
+            response,
+            tts_response_limit,
+            "WAV-ответ OpenAI слишком большой для озвучивания. Сократите текст и повторите попытку.",
+        )
+        .await
     }
 }
 
@@ -132,13 +264,15 @@ struct Transcription {
     text: String,
 }
 
-async fn read_body(mut response: Response) -> Result<Vec<u8>, String> {
+async fn read_body(
+    mut response: Response,
+    max_bytes: usize,
+    too_large_error: &str,
+) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
     while let Some(chunk) = response.chunk().await.map_err(request_error)? {
-        if chunk.len() > MAX_RESPONSE_BYTES - bytes.len() {
-            return Err(
-                "Ответ OpenAI слишком большой. Сократите запись и повторите попытку.".into(),
-            );
+        if chunk.len() > max_bytes - bytes.len() {
+            return Err(too_large_error.into());
         }
         bytes.extend_from_slice(&chunk);
     }
@@ -152,6 +286,20 @@ fn request_error(error: reqwest::Error) -> String {
     } else {
         "Не удалось связаться с OpenAI. Проверьте подключение к интернету и сетевые настройки, затем повторите попытку.".into()
     }
+}
+
+fn synthesis_status_error(status: StatusCode) -> String {
+    match status.as_u16() {
+        401 => "OpenAI отклонил API-ключ. Проверьте ключ в настройках и его действительность.",
+        403 => "Нет доступа к OpenAI. Проверьте права API-ключа и доступность сервиса для вашего аккаунта.",
+        404 => "Модель или голос для озвучивания недоступны или не найдены. Проверьте настройки и доступ к ним в OpenAI.",
+        408 | 504 => TIMEOUT_ERROR,
+        400 | 415 | 422 => "OpenAI не принял запрос озвучивания. Проверьте модель, голос и текст, затем повторите попытку.",
+        500..=599 => "OpenAI временно недоступен. Подождите немного и повторите попытку.",
+        300..=399 => "OpenAI вернул перенаправление. Запрос не перенаправлен для защиты API-ключа; проверьте сетевые настройки.",
+        _ => "OpenAI не смог озвучить текст. Проверьте настройки и повторите попытку.",
+    }
+    .into()
 }
 
 fn status_error(status: StatusCode) -> String {
@@ -191,13 +339,24 @@ mod tests {
             Self::with_options(status, body, "", Duration::ZERO)
         }
 
+        fn start_speech(status: u16, body: &str) -> Self {
+            Self::with_options_at("/v1/audio/speech", status, body, "", Duration::ZERO)
+        }
+
         fn with_options(status: u16, body: &str, headers: &str, delay: Duration) -> Self {
+            Self::with_options_at("/v1/audio/transcriptions", status, body, headers, delay)
+        }
+
+        fn with_options_at(
+            path: &str,
+            status: u16,
+            body: &str,
+            headers: &str,
+            delay: Duration,
+        ) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             listener.set_nonblocking(true).unwrap();
-            let endpoint = format!(
-                "http://{}/v1/audio/transcriptions",
-                listener.local_addr().unwrap()
-            );
+            let endpoint = format!("http://{}{}", listener.local_addr().unwrap(), path);
             let response = format!(
                 "HTTP/1.1 {status} Mock\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{headers}\r\n{body}",
                 body.len()
@@ -462,6 +621,101 @@ mod tests {
         server.finish();
         assert!(error.contains("вовремя"));
         assert_private(&error);
+    }
+
+    #[tokio::test]
+    async fn synthesize_posts_json_and_returns_wav_bytes() {
+        let wav = "RIFF-private-wav-data";
+        let server = MockServer::start_speech(200, wav);
+        let client = OpenAiClient::with_test_endpoints(
+            "http://127.0.0.1:1/v1/audio/transcriptions".into(),
+            server.endpoint.clone(),
+            Duration::from_secs(2),
+        );
+        let output = client
+            .synthesize(SECRET, "gpt-4o-mini-tts", "marin", "  private-transcript  ")
+            .await
+            .unwrap();
+        assert_eq!(output, wav.as_bytes());
+        let request = server.finish();
+        let header_end = request
+            .windows(4)
+            .position(|chunk| chunk == b"\r\n\r\n")
+            .unwrap();
+        let headers = String::from_utf8_lossy(&request[..header_end]);
+        assert!(headers.starts_with("POST /v1/audio/speech HTTP/1.1\r\n"));
+        assert!(headers
+            .to_lowercase()
+            .contains(&format!("authorization: bearer {SECRET}")));
+        assert!(headers
+            .to_lowercase()
+            .contains("content-type: application/json"));
+        let json: serde_json::Value = serde_json::from_slice(&request[header_end + 4..]).unwrap();
+        assert_eq!(json["model"], "gpt-4o-mini-tts");
+        assert_eq!(json["voice"], "marin");
+        assert_eq!(json["input"], "  private-transcript  ");
+        assert_eq!(json["response_format"], "wav");
+    }
+
+    #[tokio::test]
+    async fn synthesize_rejects_invalid_input_and_oversized_wav_safely() {
+        let client = OpenAiClient::with_test_endpoint(
+            "http://127.0.0.1:1/unreachable".into(),
+            Duration::from_secs(1),
+        );
+        for (model, voice, input, expected) in [
+            ("gpt-4o-mini-tts", "marin", " \t", "пуст"),
+            ("invalid/model", "marin", "text", "TTS-модели"),
+            ("gpt-4o-mini-tts", "bad voice", "text", "голоса"),
+        ] {
+            let error = client
+                .synthesize(SECRET, model, voice, input)
+                .await
+                .unwrap_err();
+            assert!(error.contains(expected), "{error}");
+            assert_private(&error);
+        }
+        let oversized_input = "я".repeat(MAX_TTS_INPUT_CHARS + 1);
+        let error = client
+            .synthesize(SECRET, "gpt-4o-mini-tts", "marin", &oversized_input)
+            .await
+            .unwrap_err();
+        assert!(error.contains("4096"));
+        assert_private(&error);
+
+        let server = MockServer::start_speech(200, "xxxxx");
+        let client = OpenAiClient::with_test_endpoints_and_tts_response_limit(
+            "http://127.0.0.1:1/v1/audio/transcriptions".into(),
+            server.endpoint.clone(),
+            Duration::from_secs(2),
+            4,
+        );
+        let error = client
+            .synthesize(SECRET, "gpt-4o-mini-tts", "marin", "text")
+            .await
+            .unwrap_err();
+        server.finish();
+        assert!(error.contains("WAV-ответ"));
+        assert_private(&error);
+    }
+
+    #[tokio::test]
+    async fn synthesis_errors_are_specific_and_do_not_expose_response_data() {
+        for (status, expected) in [(400, "озвучивания"), (404, "Модель или голос")]
+        {
+            let body = format!(
+                r#"{{"error":{{"message":"raw-api-error {SECRET} private-audio-data {PRIVATE_TEXT}"}}}}"#
+            );
+            let server = MockServer::start_speech(status, &body);
+            let error = server
+                .client()
+                .synthesize(SECRET, "gpt-4o-mini-tts", "marin", "text")
+                .await
+                .unwrap_err();
+            server.finish();
+            assert!(error.contains(expected), "{error}");
+            assert_private(&error);
+        }
     }
 
     #[tokio::test]
