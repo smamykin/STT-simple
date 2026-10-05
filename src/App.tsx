@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import { backend, inTauri } from './backend';
 import type { Settings } from './types';
 import { useAppState } from './useAppState';
+import { PolishSettingsFields } from './PolishSettingsFields';
 import {
   DEFAULT_MODEL, DEFAULT_TTS_MODEL, DEFAULT_TTS_VOICE, MODELS, TTS_MODELS, TTS_VOICES,
   canRunAction, formatDuration, formatShortcutHint, isBusy, normalizeSettings, settingsEqual, statusText,
@@ -54,41 +55,33 @@ export default function App() {
     tts_voice: DEFAULT_TTS_VOICE,
     input_device: null,
     auto_paste: false,
+    paste_shortcut: 'ctrl_v',
+    polish: { profile_id: null, model: 'gpt-6-luna', effort: null, custom_profiles: [] },
   });
   const [manualModel, setManualModel] = useState(false);
   const [manualTtsModel, setManualTtsModel] = useState(false);
   const [manualTtsVoice, setManualTtsVoice] = useState(false);
   const [apiKey, setApiKey] = useState('');
+  const [keyGeneration, setKeyGeneration] = useState(0);
   const [settingsError, setSettingsError] = useState<string | null>(null);
   const [keyError, setKeyError] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [confirmReset, setConfirmReset] = useState(false);
 
-  const savedShortcut = snapshot?.settings.shortcut;
-  const savedModel = snapshot?.settings.model;
-  const savedTtsShortcut = snapshot?.settings.tts_shortcut;
-  const savedTtsModel = snapshot?.settings.tts_model;
-  const savedTtsVoice = snapshot?.settings.tts_voice;
-  const savedDevice = snapshot?.settings.input_device;
-  const savedAutoPaste = snapshot?.settings.auto_paste;
+  const dirtyDraft = useRef(false);
+  const previousSettings = useRef<Settings | null>(null);
+  const savedSettings = snapshot?.settings;
   useEffect(() => {
-    if (savedShortcut === undefined || savedModel === undefined || savedTtsShortcut === undefined
-      || savedTtsModel === undefined || savedTtsVoice === undefined || savedDevice === undefined
-      || savedAutoPaste === undefined) return;
-    setDraft({
-      shortcut: savedShortcut,
-      model: savedModel,
-      tts_shortcut: savedTtsShortcut,
-      tts_model: savedTtsModel,
-      tts_voice: savedTtsVoice,
-      input_device: savedDevice,
-      auto_paste: savedAutoPaste,
-    });
-    setManualModel(!MODELS.some((model) => model.value === savedModel));
-    setManualTtsModel(!TTS_MODELS.some((model) => model.value === savedTtsModel));
-    setManualTtsVoice(!TTS_VOICES.some((voice) => voice.value === savedTtsVoice));
+    if (!savedSettings) return;
+    const previous = previousSettings.current;
+    previousSettings.current = savedSettings;
+    if (dirtyDraft.current || (previous && settingsEqual(previous, savedSettings))) return;
+    setDraft(savedSettings);
+    setManualModel(!MODELS.some((model) => model.value === savedSettings.model));
+    setManualTtsModel(!TTS_MODELS.some((model) => model.value === savedSettings.tts_model));
+    setManualTtsVoice(!TTS_VOICES.some((voice) => voice.value === savedSettings.tts_voice));
     setSettingsError(null);
-  }, [savedShortcut, savedModel, savedTtsShortcut, savedTtsModel, savedTtsVoice, savedDevice, savedAutoPaste]);
+  }, [savedSettings]);
 
   useEffect(() => {
     if (!feedback) return;
@@ -121,10 +114,15 @@ export default function App() {
   async function saveSettings(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const next = normalizeSettings(draft);
-    const error = validateSettings(next);
+    const error = validateSettings(next, snapshot?.builtin_polish_profiles.map((profile) => profile.id));
     setSettingsError(error);
     if (error) return;
-    if (await runAction('save_settings', () => backend.saveSettings(next))) {
+    if (await runAction('save_settings', async () => {
+      const saved = await backend.saveSettings(next);
+      dirtyDraft.current = false;
+      setDraft(saved.settings);
+      return saved;
+    })) {
       setFeedback('Настройки сохранены.');
     }
   }
@@ -135,6 +133,7 @@ export default function App() {
     setKeyError(error);
     if (error) return;
     if (await runAction('set_api_key', async () => {
+      setKeyGeneration((generation) => generation + 1);
       const saved = await backend.setApiKey(apiKey.trim());
       setApiKey('');
       return saved;
@@ -144,7 +143,9 @@ export default function App() {
   }
 
   function updateDraft<K extends keyof Settings>(key: K, value: Settings[K]) {
-    setDraft((current) => ({ ...current, [key]: value }));
+    const next = { ...draft, [key]: value };
+    dirtyDraft.current = !snapshot || !settingsEqual(normalizeSettings(next), snapshot.settings);
+    setDraft(next);
     setSettingsError(null);
   }
 
@@ -189,6 +190,7 @@ export default function App() {
           </div>
           <p className="recording-hint">
             {recording ? 'Нажмите «Остановить», чтобы распознать запись.'
+              : snapshot?.phase === 'polishing' ? 'Обрабатываем распознанный текст в OpenAI.'
               : processing ? 'Распознаём вашу запись. Это может занять некоторое время.'
               : speaking ? 'Начало записи остановит текущее озвучивание.'
               : snapshot && !snapshot.has_api_key ? 'Сохраните API-ключ OpenAI, чтобы начать.'
@@ -260,13 +262,31 @@ export default function App() {
             {pending === 'copy_last_transcript' ? 'Копирование…' : 'Скопировать'}
           </button>
         </div>
+        <div className="field">
+          <label htmlFor="raw-transcript">Исходный текст распознавания</label>
+          <textarea id="raw-transcript" className="transcript" readOnly rows={5}
+            value={snapshot?.last_raw_transcript ?? ''} placeholder="Здесь появится исходный текст." />
+        </div>
+        <p className="help">Последний успешный итоговый текст</p>
         <label className="visually-hidden" htmlFor="transcript">Текст последней диктовки</label>
         <textarea id="transcript" className="transcript" readOnly rows={7}
-          value={snapshot?.last_transcript ?? ''} placeholder="Здесь появится распознанный текст."
+          value={snapshot?.last_transcript ?? ''} placeholder="Здесь появится итоговый текст после успешной обработки."
           aria-describedby="transcript-help" />
-        <p className="help" id="transcript-help">{mac && snapshot?.settings.auto_paste
-          ? 'При диктовке через hotkey текст автоматически вставляется в активное поле и остаётся в буфере обмена.'
-          : 'Текст копируется в буфер обмена — вставьте его сочетанием Cmd+V или Ctrl+V.'}</p>
+        <p className="help">Исходный и итоговый текст хранятся только в памяти приложения.
+          При ошибке полировки исходный текст остаётся доступен, а итоговый появится после успешного повтора.</p>
+        {snapshot?.can_retry_polish && <div className="field">
+          <p className="help" id="retry-polish-help">Повтор использует настройки неудавшейся задачи,
+            а не текущие настройки. Успешный результат только копируется, без автоматической вставки.
+            Это дополнительный платный запрос в OpenAI.</p>
+          <button className="button button-secondary" aria-describedby="retry-polish-help"
+            disabled={!connected || pending !== null || !canRunAction('retry_polish', snapshot)}
+            onClick={() => void runAction('retry_polish', backend.retryPolish)}>
+            {pending === 'retry_polish' ? 'Повтор…' : 'Повторить обработку текста'}
+          </button>
+        </div>}
+        <p className="help" id="transcript-help">{(mac || linux) && snapshot?.settings.auto_paste
+          ? 'При записи, начатой глобальным hotkey и остановленной hotkey или автоматически по лимиту, текст автоматически вставляется в активное поле на момент завершения распознавания и обработки текста и остаётся в буфере обмена.'
+          : 'Текст копируется в буфер обмена — вставьте его рабочим для целевого поля сочетанием: Cmd+V на macOS, Ctrl+V или Ctrl+Shift+V на Linux.'}</p>
       </section>
 
       <div className="settings-grid">
@@ -383,17 +403,43 @@ export default function App() {
                       : ' После сохранения приложение зарегистрирует сочетание в системе.'}</p>
                 </div>
               </div>
-              {mac && (
+              {(mac || linux) && (
                 <div className="field checkbox-field">
                   <label className="checkbox-label" htmlFor="auto-paste">
-                    <input id="auto-paste" type="checkbox" checked={draft.auto_paste}
+                    <input id="auto-paste" type="checkbox" checked={draft.auto_paste} aria-describedby="auto-paste-help"
                       onChange={(event) => updateDraft('auto_paste', event.target.checked)} />
                     <span>Автоматически вставлять результат</span>
                   </label>
-                  <p className="help">Работает для записи, начатой глобальным hotkey. macOS запросит
-                    разрешение «Универсальный доступ»; при отказе текст всё равно останется в буфере обмена.</p>
+                  <p className="help" id="auto-paste-help">По умолчанию выключено. Работает только для записи,
+                    начатой глобальным hotkey и остановленной hotkey или автоматически по лимиту.
+                    Кнопка и меню трея только копируют текст. Не переключайте фокус: вставка идёт
+                    в активное поле на момент завершения распознавания. {mac
+                      ? 'macOS запросит разрешение «Универсальный доступ» для Cmd+V; при отказе текст всё равно останется в буфере обмена.'
+                      : <>{systemHotkey
+                        ? 'Wayland: нужен ydotool; для современного ydotool 1.x самостоятельно настройте демон, доступ к uinput и сокету по инструкции вашего дистрибутива. YDOTOOL_SOCKET наследуется из окружения приложения. Пакет Ubuntu 22.04 может быть устаревшим.'
+                        : 'X11: нужен xdotool в PATH.'} Приложение не запускает sudo и не настраивает службы.
+                        При ошибке или тайм-ауте 5 секунд текст остаётся в буфере обмена.</>}</p>
                 </div>
               )}
+              {linux && (
+                <div className="field">
+                  <label htmlFor="paste-shortcut">Сочетание для вставки</label>
+                  <select id="paste-shortcut" value={draft.paste_shortcut} disabled={!draft.auto_paste}
+                    aria-describedby="paste-shortcut-help"
+                    onChange={(event) => updateDraft('paste_shortcut', event.target.value as Settings['paste_shortcut'])}>
+                    <option value="ctrl_v">Ctrl+V</option>
+                    <option value="ctrl_shift_v">Ctrl+Shift+V</option>
+                  </select>
+                  <p className="help" id="paste-shortcut-help">По умолчанию Ctrl+V. Выберите сочетание, которое
+                    работает вручную в целевом поле. Ctrl+Shift+V может подойти для вставки обычного текста
+                    в чат Zed или в терминал — проверьте конкретное поле. Выбор один для всех приложений:
+                    приложение не определяет цель и не пробует второе сочетание после первого.</p>
+                </div>
+              )}
+              <PolishSettingsFields key={`${keyGeneration}:${snapshot?.has_api_key}:${connected}`}
+                value={draft.polish} builtins={snapshot?.builtin_polish_profiles ?? []}
+                hasApiKey={snapshot?.has_api_key ?? false}
+                onChange={(value) => updateDraft('polish', value)} />
               <button className="button button-secondary" type="submit" disabled={!settingsChanged && !systemHotkey}>
                 {pending === 'save_settings' ? 'Сохранение…' : 'Сохранить настройки'}
               </button>
@@ -430,7 +476,10 @@ export default function App() {
                 </button>
                 <button className="button button-danger-quiet" type="button" disabled={!snapshot?.has_api_key}
                   onClick={async () => {
-                    if (await runAction('delete_api_key', backend.deleteApiKey)) {
+                    if (await runAction('delete_api_key', () => {
+                                          setKeyGeneration((generation) => generation + 1);
+                                          return backend.deleteApiKey();
+                                        })) {
                       setApiKey('');
                       setKeyError(null);
                       setFeedback('API-ключ удалён. Для новой записи потребуется сохранить ключ.');

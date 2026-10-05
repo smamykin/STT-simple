@@ -1,13 +1,15 @@
-//! Shared settings, local persistence, WAV encoding, and direct speech transcription.
+//! Shared settings, local persistence, WAV encoding, speech transcription/synthesis, and optional polishing.
 //! API keys and transcripts are intentionally absent from persisted data.
 
 mod audio;
 mod client;
 mod persistence;
+mod polish;
 
 pub use audio::encode_wav;
-pub use client::OpenAiClient;
+pub use client::{OpenAiClient, OpenAiModel};
 pub use persistence::{load_data, save_data, SaveOutcome};
+pub use polish::{builtin_polish_profiles, PolishProfile, PolishSettings};
 
 use serde::{Deserialize, Serialize};
 
@@ -19,6 +21,14 @@ pub const DEFAULT_TTS_MODEL: &str = "gpt-4o-mini-tts";
 pub const DEFAULT_TTS_VOICE: &str = "marin";
 pub const MAX_TTS_INPUT_CHARS: usize = 4096;
 
+#[derive(Clone, Copy, Default, Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PasteShortcut {
+    #[default]
+    CtrlV,
+    CtrlShiftV,
+}
+
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 #[serde(default)]
 pub struct Settings {
@@ -29,6 +39,8 @@ pub struct Settings {
     pub tts_voice: String,
     pub input_device: Option<String>,
     pub auto_paste: bool,
+    pub paste_shortcut: PasteShortcut,
+    pub polish: PolishSettings,
 }
 
 impl Default for Settings {
@@ -46,6 +58,8 @@ impl Default for Settings {
             tts_voice: DEFAULT_TTS_VOICE.to_owned(),
             input_device: None,
             auto_paste: false,
+            paste_shortcut: PasteShortcut::default(),
+            polish: PolishSettings::default(),
         }
     }
 }
@@ -53,6 +67,7 @@ impl Default for Settings {
 impl Settings {
     pub fn validate(&self) -> Result<(), String> {
         validate_model(&self.model)?;
+        self.polish.validate()?;
         validate_model(&self.tts_model)
             .map_err(|_| "Некорректный идентификатор TTS-модели. Используйте от 1 до 128 ASCII-символов: первая буква или цифра, далее буквы, цифры и . _ - : без пробелов.".to_owned())?;
         validate_voice(&self.tts_voice)?;
@@ -218,6 +233,26 @@ pub struct StoredData {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paste_shortcut_defaults_for_old_settings_and_roundtrips() {
+        let old: Settings = serde_json::from_str(r#"{"auto_paste":true}"#).unwrap();
+        assert!(old.auto_paste);
+        assert_eq!(old.paste_shortcut, PasteShortcut::CtrlV);
+        for (shortcut, value) in [
+            (PasteShortcut::CtrlV, "ctrl_v"),
+            (PasteShortcut::CtrlShiftV, "ctrl_shift_v"),
+        ] {
+            let settings = Settings {
+                paste_shortcut: shortcut,
+                ..old.clone()
+            };
+            let json = serde_json::to_value(&settings).unwrap();
+            assert_eq!(json["paste_shortcut"], value);
+            assert_eq!(serde_json::from_value::<Settings>(json).unwrap(), settings);
+        }
+        assert!(serde_json::from_str::<Settings>(r#"{"paste_shortcut":"alt_v"}"#).is_err());
+    }
 
     #[test]
     fn default_settings_and_valid_model_ids() {

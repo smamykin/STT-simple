@@ -7,6 +7,7 @@ export const inTauri = isTauri();
 export const backend = {
   getSnapshot: () => invoke<Snapshot>('get_snapshot'),
   listInputDevices: () => invoke<InputDevice[]>('list_input_devices'),
+  listOpenAiModels: () => invoke<{ id: string; created: number }[]>('list_openai_models'),
   saveSettings: (settings: Settings) => invoke<Snapshot>('save_settings', { settings }),
   setApiKey: (apiKey: string) => invoke<Snapshot>('set_api_key', { apiKey }),
   deleteApiKey: () => invoke<Snapshot>('delete_api_key'),
@@ -15,6 +16,7 @@ export const backend = {
   cancelRecording: () => invoke<void>('cancel_recording'),
   resetStatistics: () => invoke<Snapshot>('reset_statistics'),
   copyLastTranscript: () => invoke<void>('copy_last_transcript'),
+  retryPolish: () => invoke<void>('retry_polish'),
   quitApp: () => invoke<void>('quit_app'),
   subscribe: (onSnapshot: (snapshot: Snapshot) => void) =>
     listen<Snapshot>('app-state', (event) => onSnapshot(event.payload)),

@@ -14,12 +14,14 @@ describe('Tauri command contract', () => {
     const commands = [
       [backend.getSnapshot, 'get_snapshot'],
       [backend.listInputDevices, 'list_input_devices'],
+      [backend.listOpenAiModels, 'list_openai_models'],
       [backend.deleteApiKey, 'delete_api_key'],
       [backend.toggleRecording, 'toggle_recording'],
       [backend.toggleSpeech, 'toggle_speech'],
       [backend.cancelRecording, 'cancel_recording'],
       [backend.resetStatistics, 'reset_statistics'],
       [backend.copyLastTranscript, 'copy_last_transcript'],
+      [backend.retryPolish, 'retry_polish'],
       [backend.quitApp, 'quit_app'],
     ] as const;
     for (const [command, name] of commands) {

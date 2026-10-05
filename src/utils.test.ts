@@ -2,18 +2,12 @@ import { describe, expect, it } from 'vitest';
 import { makeSnapshot } from './testFixtures';
 import type { Action, Settings } from './types';
 import {
-  MODELS, TTS_MODELS, TTS_VOICES, canRunAction, errorMessage, formatDuration, formatShortcutHint,
-  isBusy, normalizeSettings, settingsEqual, statusText, validateApiKey, validateSettings,
+  MODELS, TTS_MODELS, TTS_VOICES, canRunAction, createPolishProfileId, errorMessage, formatDuration,
+  formatShortcutHint, isBusy, normalizeSettings, settingsEqual, statusText, validateApiKey, validateSettings,
 } from './utils';
 
 const settings: Settings = {
-  shortcut: 'Super+R',
-  model: 'gpt-4o-mini-transcribe',
-  tts_shortcut: 'Control+Super+A',
-  tts_model: 'gpt-4o-mini-tts',
-  tts_voice: 'marin',
-  input_device: null,
-  auto_paste: false,
+  ...makeSnapshot().settings,
 };
 
 const configurationActions: Action[] = [
@@ -66,7 +60,7 @@ describe('status and action guards', () => {
   });
 
   it('does not enable actions without an initial snapshot', () => {
-    for (const action of [...configurationActions, 'toggle_recording', 'toggle_speech', 'cancel_recording', 'copy_last_transcript'] as Action[]) {
+    for (const action of [...configurationActions, 'toggle_recording', 'toggle_speech', 'cancel_recording', 'copy_last_transcript', 'retry_polish'] as Action[]) {
       expect(canRunAction(action, null)).toBe(false);
     }
   });
@@ -95,12 +89,12 @@ describe('status and action guards', () => {
     expect(canRunAction('copy_last_transcript', makeSnapshot({ phase, last_transcript: 'Текст' }))).toBe(false);
   });
 
-  it('uses Russian status labels for every phase', () => {
+  it('uses distinct Russian status labels for every phase', () => {
     expect(isBusy('idle')).toBe(false);
     expect(statusText('idle')).toBe('Готово к диктовке');
     expect(statusText('recording')).toBe('Идёт запись');
     expect(statusText('transcribing')).toBe('Обработка записи');
-    expect(statusText('polishing')).toBe(statusText('transcribing'));
+    expect(statusText('polishing')).toBe('Обработка текста');
     expect(statusText('synthesizing')).toBe('Создаём речь');
     expect(statusText('playing')).toBe('Воспроизводим речь');
   });
@@ -109,7 +103,9 @@ describe('status and action guards', () => {
 describe('settings validation', () => {
   it('accepts all suggested models, voices and platform default shortcuts', () => {
     for (const model of MODELS) {
-      expect(validateSettings({ ...settings, model: model.value })).toBeNull();
+      for (const shortcut of ['Super+R', 'Control+Super+R']) {
+        expect(validateSettings({ ...settings, model: model.value, shortcut })).toBeNull();
+      }
     }
     for (const model of TTS_MODELS) {
       expect(validateSettings({ ...settings, tts_model: model.value })).toBeNull();
@@ -120,8 +116,9 @@ describe('settings validation', () => {
     expect(TTS_VOICES.some((voice) => voice.value === 'marin')).toBe(true);
   });
 
-  it('normalizes whitespace in every textual setting without replacing the selected device', () => {
+  it.each(['ctrl_v', 'ctrl_shift_v'] as const)('normalizes whitespace in every textual setting without replacing the device or paste chord %s', (paste_shortcut) => {
     expect(normalizeSettings({
+      ...settings,
       shortcut: ' Control + Super + R ',
       model: ' whisper-1 ',
       tts_shortcut: ' Control + Super + A ',
@@ -129,7 +126,9 @@ describe('settings validation', () => {
       tts_voice: ' marin ',
       input_device: 'mic-1',
       auto_paste: true,
+      paste_shortcut,
     })).toEqual({
+      ...settings,
       shortcut: 'Control+Super+R',
       model: 'whisper-1',
       tts_shortcut: 'Control+Super+A',
@@ -137,6 +136,7 @@ describe('settings validation', () => {
       tts_voice: 'marin',
       input_device: 'mic-1',
       auto_paste: true,
+      paste_shortcut,
     });
   });
 
@@ -181,6 +181,7 @@ describe('settings validation', () => {
       { tts_voice: 'cedar' },
       { input_device: 'mic-1' },
       { auto_paste: true },
+      { paste_shortcut: 'ctrl_shift_v' as const },
     ]) {
       expect(settingsEqual(settings, { ...settings, ...changed })).toBe(false);
     }
@@ -191,6 +192,79 @@ describe('settings validation', () => {
     expect(formatShortcutHint('Alt+Shift+Super+R', true)).toBe('Option+Shift+Cmd+R');
     expect(formatShortcutHint(settings.tts_shortcut, false)).toBe(settings.tts_shortcut);
     expect(settings.tts_shortcut).toBe('Control+Super+A');
+  });
+});
+
+describe('polishing settings and retry guards', () => {
+  const profile = { id: 'custom-example', name: 'Профиль', instruction: 'Инструкция' };
+  const withProfile: Settings = { ...settings, polish: { ...settings.polish, profile_id: profile.id, custom_profiles: [profile] } };
+
+  it('normalizes model, profile name and instruction without mutating the input', () => {
+    const input = { ...withProfile, polish: { ...withProfile.polish, model: ' gpt-5 ', custom_profiles: [{ ...profile, name: ' Имя ', instruction: ' Первая\n  вторая ' }] } };
+    const normalized = normalizeSettings(input);
+    expect(normalized.polish).toEqual({ profile_id: profile.id, model: 'gpt-5', effort: null, custom_profiles: [{ ...profile, name: 'Имя', instruction: 'Первая\n  вторая' }] });
+    expect(input.polish.model).toBe(' gpt-5 ');
+    expect(input.polish.custom_profiles[0]?.name).toBe(' Имя ');
+  });
+
+  it('compares every polishing field by value, including changes within profiles', () => {
+    expect(settingsEqual(withProfile, structuredClone(withProfile))).toBe(true);
+    for (const polish of [
+      { ...withProfile.polish, model: 'gpt-5' },
+      { ...withProfile.polish, profile_id: null },
+      { ...withProfile.polish, effort: 'none' },
+      { ...withProfile.polish, custom_profiles: [] },
+      ...['id', 'name', 'instruction'].map((field) => ({ ...withProfile.polish, custom_profiles: [{ ...profile, [field]: 'different' }] })),
+    ]) expect(settingsEqual(withProfile, { ...withProfile, polish })).toBe(false);
+  });
+
+  it('generates safe distinct IDs without using profile names', () => {
+    const id = createPolishProfileId([profile]);
+    const second = createPolishProfileId([profile, { ...profile, id }]);
+    expect(id).toMatch(/^custom-[a-f0-9-]+$/);
+    expect(second).not.toBe(id);
+    expect(validateSettings({ ...settings, polish: { ...settings.polish, custom_profiles: [{ ...profile, id }] } })).toBeNull();
+  });
+
+  it('rejects invalid models, efforts, missing selections and invalid or conflicting custom profiles even when off', () => {
+    for (const polish of [
+      { ...settings.polish, model: '' },
+      { ...settings.polish, model: 'gpt 5' },
+      { ...settings.polish, model: 'gpt-5\n' },
+      { ...settings.polish, effort: '' },
+      { ...settings.polish, effort: 'extreme' },
+      { ...settings.polish, profile_id: 'missing' },
+      ...[
+        [profile, profile],
+        [{ ...profile, id: 'polish' }],
+        [{ ...profile, id: 'markdown' }],
+        [{ ...profile, id: 'developer' }],
+        [{ ...profile, id: 'bad id' }],
+        [{ ...profile, id: 'custom\n' }],
+        [{ ...profile, name: 'я'.repeat(81) }],
+        [{ ...profile, instruction: 'я'.repeat(8001) }],
+        Array.from({ length: 33 }, (_, index) => ({ ...profile, id: `custom-${index}` })),
+        [{ ...profile, name: ' ' }],
+        [{ ...profile, instruction: '\n' }],
+      ].map((custom_profiles) => ({ ...settings.polish, custom_profiles })),
+    ]) expect(validateSettings({ ...settings, polish })).not.toBeNull();
+    expect(validateSettings(withProfile)).toBeNull();
+    expect(validateSettings({ ...settings, polish: { ...settings.polish, custom_profiles: [
+      { id: 'custom.v2:test', name: '😀'.repeat(80), instruction: '😀'.repeat(8000) },
+    ] } })).toBeNull();
+    for (const effort of [null, 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']) {
+      expect(validateSettings({ ...settings, polish: { ...settings.polish, effort } })).toBeNull();
+    }
+  });
+
+  it('allows retry only when idle, with a key and a failed job flagged by the backend', () => {
+    const ready = makeSnapshot({ can_retry_polish: true });
+    expect(canRunAction('retry_polish', ready)).toBe(true);
+    expect(canRunAction('retry_polish', { ...ready, can_retry_polish: false })).toBe(false);
+    expect(canRunAction('retry_polish', { ...ready, has_api_key: false })).toBe(false);
+    for (const phase of [...sttPhases, ...ttsPhases]) {
+      expect(canRunAction('retry_polish', { ...ready, phase })).toBe(false);
+    }
   });
 });
 

@@ -152,6 +152,7 @@ mod tests {
         let mut data = StoredData::default();
         data.settings.input_device = Some("микрофон-1".into());
         data.settings.auto_paste = true;
+        data.settings.paste_shortcut = crate::PasteShortcut::CtrlShiftV;
         data.statistics.add_recording(3.5).unwrap();
         let outcome = save_data(&path, &data).unwrap();
         assert_eq!(outcome.durability_warning, None);
@@ -169,6 +170,58 @@ mod tests {
         assert!(object.contains_key("settings"));
         assert!(object.contains_key("statistics"));
         assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn polish_migration_roundtrip_and_invalid_saves_preserve_disk() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("settings.json");
+        fs::write(
+            &path,
+            r#"{"settings":{"model":"whisper-1","auto_paste":true}}"#,
+        )
+        .unwrap();
+        let mut data = load_data(&path).unwrap();
+        assert_eq!(data.settings.polish, crate::PolishSettings::default());
+        assert_eq!(data.settings.model, "whisper-1");
+        assert!(data.settings.auto_paste);
+        data.settings.polish = crate::PolishSettings {
+            profile_id: Some("my-profile".into()),
+            model: "gpt-5-mini".into(),
+            effort: Some("low".into()),
+            custom_profiles: vec![crate::PolishProfile {
+                id: "my-profile".into(),
+                name: "Личный профиль".into(),
+                instruction: "Исправь пунктуацию.".into(),
+            }],
+        };
+        save_data(&path, &data).unwrap();
+        assert_eq!(load_data(&path).unwrap().settings, data.settings);
+        let previous = fs::read(&path).unwrap();
+        let mut invalids = Vec::new();
+        let mut invalid = data.clone();
+        invalid.settings.polish.profile_id = Some("missing".into());
+        invalids.push(invalid);
+        let mut invalid = data.clone();
+        invalid.settings.polish.custom_profiles[0].id = "polish".into();
+        invalids.push(invalid);
+        let mut invalid = data.clone();
+        invalid.settings.polish.effort = Some("invalid".into());
+        invalids.push(invalid);
+        let mut invalid = data.clone();
+        invalid.settings.polish.custom_profiles[0]
+            .instruction
+            .clear();
+        invalids.push(invalid);
+        for invalid in invalids {
+            assert!(save_data(&path, &invalid).is_err());
+            assert_eq!(fs::read(&path).unwrap(), previous);
+            let json = serde_json::to_vec(&invalid).unwrap();
+            fs::write(&path, &json).unwrap();
+            assert!(load_data(&path).is_err());
+            assert_eq!(fs::read(&path).unwrap(), json);
+            fs::write(&path, &previous).unwrap();
+        }
     }
 
     #[test]
