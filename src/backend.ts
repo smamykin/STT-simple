@@ -12,6 +12,7 @@ export const backend = {
   setApiKey: (apiKey: string) => invoke<Snapshot>('set_api_key', { apiKey }),
   deleteApiKey: () => invoke<Snapshot>('delete_api_key'),
   toggleRecording: () => invoke<void>('toggle_recording'),
+  toggleSpeech: () => invoke<void>('toggle_speech'),
   cancelRecording: () => invoke<void>('cancel_recording'),
   resetStatistics: () => invoke<Snapshot>('reset_statistics'),
   copyLastTranscript: () => invoke<void>('copy_last_transcript'),

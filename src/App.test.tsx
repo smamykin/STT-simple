@@ -16,6 +16,7 @@ const backend = vi.hoisted(() => ({
   setApiKey: vi.fn(),
   deleteApiKey: vi.fn(),
   toggleRecording: vi.fn(),
+  toggleSpeech: vi.fn(),
   cancelRecording: vi.fn(),
   resetStatistics: vi.fn(),
   copyLastTranscript: vi.fn(),
@@ -272,7 +273,7 @@ describe('polishing interface', () => {
     expect(screen.getByLabelText('Профиль обработки текста')).toHaveProperty('value', 'markdown');
   });
 
-  it.each(['recording', 'transcribing', 'polishing', 'no-key', 'unavailable'] as const)('does not allow retry in %s', async (state) => {
+  it.each(['recording', 'transcribing', 'polishing', 'synthesizing', 'playing', 'no-key', 'unavailable'] as const)('does not allow retry in %s', async (state) => {
     await mount(makeSnapshot({
       phase: state === 'no-key' || state === 'unavailable' ? 'idle' : state,
       can_retry_polish: state !== 'unavailable', has_api_key: state !== 'no-key',
@@ -285,7 +286,7 @@ describe('polishing interface', () => {
     expect(screen.getByLabelText('Текст последней диктовки')).toHaveProperty('value', '');
   });
 
-  it.each(['recording', 'transcribing', 'polishing'] as const)('locks custom profile editing during %s', async (phase) => {
+  it.each(['recording', 'transcribing', 'polishing', 'synthesizing', 'playing'] as const)('locks custom profile editing during %s', async (phase) => {
     const snapshot = makeSnapshot({ phase });
     snapshot.settings.polish = { ...snapshot.settings.polish, profile_id: 'custom-test',
       custom_profiles: [{ id: 'custom-test', name: 'Профиль', instruction: 'Инструкция' }] };
@@ -321,13 +322,16 @@ describe('Russian dictation interface', () => {
     expect(screen.getByText('01:01:01')).toBeTruthy();
     expect(screen.getByRole('option', { name: 'USB микрофон — по умолчанию' })).toBeTruthy();
     expect(screen.getAllByRole('option').filter((option) => option.parentElement?.id === 'model')).toHaveLength(MODELS.length + 1);
-        expect(screen.getByRole('option', { name: 'GPT Transcribe — рекомендован OpenAI' })).toBeTruthy();
-        expect(screen.getByRole('option', { name: 'GPT-4o mini Transcribe — 2025-12-15' })).toBeTruthy();
+    expect(screen.getByRole('option', { name: 'GPT Transcribe — рекомендован OpenAI' })).toBeTruthy();
+    expect(screen.getByRole('option', { name: 'GPT-4o mini Transcribe — 2025-12-15' })).toBeTruthy();
+    expect(screen.getByRole('option', { name: 'GPT-4o mini TTS — рекомендован OpenAI' })).toBeTruthy();
+    expect(screen.getByRole('option', { name: 'Marin — рекомендован OpenAI' })).toBeTruthy();
   });
 
   it('requires an API key before enabling start', async () => {
     await mount(makeSnapshot({ has_api_key: false }));
     expect(screen.getByRole('button', { name: 'Начать запись' })).toHaveProperty('disabled', true);
+    expect(screen.getByRole('button', { name: 'Озвучить буфер' })).toHaveProperty('disabled', true);
     expect(screen.getByText('Сохраните API-ключ OpenAI, чтобы начать.')).toBeTruthy();
   });
 
@@ -350,22 +354,56 @@ describe('Russian dictation interface', () => {
     await waitFor(() => expect(backend.cancelRecording).toHaveBeenCalledOnce());
   });
 
-  it.each(['recording', 'transcribing', 'polishing'] as const)('locks settings, key and statistics during %s', async (phase) => {
+  it('starts and stops speech through the backend without exposing clipboard contents', async () => {
+    await mount();
+    backend.toggleSpeech.mockResolvedValue(undefined);
+    expect(screen.getByText(/Текст из буфера обмена отправляется в OpenAI/)).toBeTruthy();
+    expect(screen.getByText(/Голос сгенерирован ИИ/)).toBeTruthy();
+    expect(screen.getByText(/Использование API оплачивается вашим аккаунтом OpenAI; приложение не рассчитывает стоимость/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Озвучить буфер' }));
+    await waitFor(() => expect(backend.toggleSpeech).toHaveBeenCalledOnce());
+
+    emit(makeSnapshot({ phase: 'synthesizing', has_api_key: false }));
+    vi.spyOn(performance, 'now').mockReturnValue(performance.now() + 1000);
+    expect(screen.getByText('Создаём речь', { selector: '.speech-card .status-badge' })).toBeTruthy();
+    const stop = screen.getByRole('button', { name: 'Остановить' });
+    expect(stop).toHaveProperty('disabled', false);
+    fireEvent.click(stop);
+    await waitFor(() => expect(backend.toggleSpeech).toHaveBeenCalledTimes(2));
+    expect(document.body.textContent).not.toContain('runtime session');
+    expect(document.body.textContent).not.toContain('WAV');
+  });
+
+  it.each(['synthesizing', 'playing'] as const)('keeps recording available during %s when a key exists', async (phase) => {
+    await mount(makeSnapshot({ phase, has_api_key: true }));
+    const record = screen.getByRole('button', { name: 'Начать запись' });
+    expect(record).toHaveProperty('disabled', false);
+    backend.toggleRecording.mockResolvedValue(undefined);
+    fireEvent.click(record);
+    await waitFor(() => expect(backend.toggleRecording).toHaveBeenCalledOnce());
+  });
+
+  it.each(['recording', 'transcribing', 'polishing'] as const)('disables speech during %s', async (phase) => {
+    await mount(makeSnapshot({ phase }));
+    expect(screen.getByRole('button', { name: 'Озвучить буфер' })).toHaveProperty('disabled', true);
+  });
+
+  it.each(['recording', 'transcribing', 'polishing', 'synthesizing', 'playing'] as const)('locks settings, key and statistics during %s', async (phase) => {
     await mount(makeSnapshot({
       phase,
       statistics: { last_recording_seconds: 5, total_recording_seconds: 5, recordings: 1 },
     }));
-    for (const label of ['Микрофон', 'Модель', 'Сочетание клавиш', 'Новый ключ', 'Профиль обработки текста', 'Модель обработки текста', 'Уровень рассуждения']) {
+    for (const label of ['Микрофон', 'Модель', 'Сочетание клавиш', 'TTS-модель', 'Голос', 'Сочетание клавиш озвучивания', 'Новый ключ', 'Профиль обработки текста', 'Модель обработки текста', 'Уровень рассуждения']) {
       expect((screen.getByLabelText(label) as HTMLInputElement).matches(':disabled')).toBe(true);
     }
     expect(screen.getByRole('button', { name: 'Сбросить' })).toHaveProperty('disabled', true);
     expect(Boolean(screen.queryByRole('button', { name: 'Отменить запись' }))).toBe(phase === 'recording');
-    if (phase !== 'recording') {
+    if (phase === 'transcribing' || phase === 'polishing') {
       expect(screen.getByRole('button', { name: 'Обработка…' })).toHaveProperty('disabled', true);
     }
   });
 
-  it.each(['recording', 'transcribing', 'polishing'] as const)('disables Copy during %s even with a transcript and re-enables it when idle', async (phase) => {
+  it.each(['recording', 'transcribing', 'polishing', 'synthesizing', 'playing'] as const)('disables Copy during %s even with a transcript and re-enables it when idle', async (phase) => {
     const idle = makeSnapshot({ last_transcript: 'Готовый текст' });
     await mount(idle);
     const copy = screen.getByRole('button', { name: 'Скопировать' });
@@ -388,8 +426,8 @@ describe('Russian dictation interface', () => {
     const original = makeSnapshot({ settings: { ...makeSnapshot().settings, input_device: 'mic-1' } });
     await mount(original);
     const settings: Settings = {
-      ...makeSnapshot().settings,
-      shortcut: 'Control+Super+R', model: 'whisper-1', input_device: null, auto_paste: false, paste_shortcut: 'ctrl_v',
+      ...original.settings,
+      shortcut: 'Control+Super+R', model: 'whisper-1', input_device: null, auto_paste: false,
     };
     const saved = makeSnapshot({ settings });
     backend.saveSettings.mockResolvedValue(saved);
@@ -413,6 +451,8 @@ describe('Russian dictation interface', () => {
     const autoPaste = screen.getByLabelText('Автоматически вставлять результат');
     expect(autoPaste).toHaveProperty('checked', false);
     expect(screen.getByText(/разрешение «Универсальный доступ»/)).toBeTruthy();
+    expect(screen.getAllByText('Ctrl+Cmd+A', { selector: 'kbd' }).length).toBeGreaterThan(0);
+    expect(screen.getByLabelText('Сочетание клавиш озвучивания')).toHaveProperty('value', 'Control+Super+A');
     const saved = makeSnapshot({ settings: { ...initial.settings, auto_paste: true } });
     backend.saveSettings.mockResolvedValue(saved);
     backend.getSnapshot.mockResolvedValue(saved);
@@ -585,26 +625,31 @@ describe('Russian dictation interface', () => {
   it('offers applying a missing GNOME shortcut even when settings have not changed', async () => {
     vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (X11; Linux x86_64)');
     const command = '"/opt/STT Simple/stt-simple" --toggle';
+    const ttsCommand = '"/opt/STT Simple/stt-simple" --toggle-tts';
     await mount(makeSnapshot({ hotkey_available: false, hotkey_mode: 'system', hotkey_command: command,
-      hotkey_message: 'Системное сочетание отсутствует.' }));
+      hotkey_message: 'Системное сочетание отсутствует.', tts_hotkey_available: false,
+      tts_hotkey_command: ttsCommand, tts_hotkey_message: 'Назначьте озвучивание вручную. TTS на Linux не проверен.' }));
     expect(screen.getByText(command)).toBeTruthy();
+    expect(screen.getByText(ttsCommand)).toBeTruthy();
+    expect(screen.getAllByText(/TTS на Linux не проверен/)).toHaveLength(2);
+    expect(screen.getByText(/автоматическая регистрация GNOME применяется только к диктовке/i)).toBeTruthy();
     expect(screen.getByText(/не настроено в GNOME/)).toBeTruthy();
     expect(screen.queryByText(/недоступно, используйте кнопку/)).toBeNull();
     expect(screen.queryByText(/не удалось зарегистрировать/)).toBeNull();
     expect(screen.getByText(/Чужие сочетания не перезаписываются/)).toBeTruthy();
-    expect(screen.getByText('Системное сочетание отсутствует.')).toBeTruthy();
+    expect(screen.getByText(/Системное сочетание отсутствует/)).toBeTruthy();
     expect(screen.getByText(/Для работы в фоне сверните окно/)).toBeTruthy();
     expect(screen.getByText(/В Linux закрытие окна тоже сворачивает его, а не скрывает в системный трей/)).toBeTruthy();
     expect(screen.getByText(/Привязка проверяется при запуске и сохранении настроек/)).toBeTruthy();
-        const saved = makeSnapshot({ hotkey_available: true, hotkey_mode: 'system', hotkey_command: command });
-        backend.saveSettings.mockResolvedValue(saved);
-        backend.getSnapshot.mockResolvedValue(saved);
-        const save = screen.getByRole('button', { name: 'Сохранить настройки' });
-        expect(save).toHaveProperty('disabled', false);
-        fireEvent.click(save);
-        await screen.findByText('Настройки сохранены.');
-        expect(backend.saveSettings).toHaveBeenCalledWith(saved.settings);
-        expect(screen.getByText(/· настроено в GNOME/)).toBeTruthy();
+    const saved = makeSnapshot({ hotkey_available: true, hotkey_mode: 'system', hotkey_command: command });
+    backend.saveSettings.mockResolvedValue(saved);
+    backend.getSnapshot.mockResolvedValue(saved);
+    const save = screen.getByRole('button', { name: 'Сохранить настройки' });
+    expect(save).toHaveProperty('disabled', false);
+    fireEvent.click(save);
+    await screen.findByText('Настройки сохранены.');
+    expect(backend.saveSettings).toHaveBeenCalledWith(saved.settings);
+    expect(screen.getByText(/· настроено в GNOME/)).toBeTruthy();
   });
 
   it('does not show Wayland instructions on Linux with native shortcut registration', async () => {
@@ -612,7 +657,7 @@ describe('Russian dictation interface', () => {
     await mount(makeSnapshot({ hotkey_mode: 'native', hotkey_available: true }));
     expect(screen.queryByRole('heading', { name: 'Системное сочетание клавиш' })).toBeNull();
     expect(screen.queryByText(/настроено в GNOME/)).toBeNull();
-    expect(screen.getByText(/зарегистрировано/)).toBeTruthy();
+    expect(screen.getAllByText(/зарегистрировано/)).toHaveLength(2);
   });
 
   it('keeps the saved GNOME status and settings when applying another shortcut fails', async () => {
@@ -659,6 +704,64 @@ describe('Russian dictation interface', () => {
     await screen.findByText('Настройки сохранены.');
     expect(backend.saveSettings).toHaveBeenCalledWith(settings);
     expect(screen.getByLabelText('ID модели OpenAI')).toHaveProperty('value', settings.model);
+  });
+
+  it('allows custom TTS model and voice IDs and preserves them', async () => {
+    const settings = {
+      ...makeSnapshot().settings,
+      tts_model: 'future-tts-snapshot',
+      tts_voice: 'voice_1.0:preview',
+    };
+    await mount();
+    backend.saveSettings.mockResolvedValue(makeSnapshot({ settings }));
+    fireEvent.change(screen.getByLabelText('TTS-модель'), { target: { value: '__custom__' } });
+    fireEvent.change(screen.getByLabelText('ID TTS-модели OpenAI'), { target: { value: settings.tts_model } });
+    fireEvent.change(screen.getByLabelText('Голос'), { target: { value: '__custom__' } });
+    fireEvent.change(screen.getByLabelText('ID голоса OpenAI'), { target: { value: settings.tts_voice } });
+    fireEvent.click(screen.getByRole('button', { name: 'Сохранить настройки' }));
+    await screen.findByText('Настройки сохранены.');
+    expect(backend.saveSettings).toHaveBeenCalledWith(settings);
+  });
+
+  it('preserves a combined TTS, polishing and Linux paste draft across backend settings events and saves every field', async () => {
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (X11; Linux x86_64)');
+    const initial = makeSnapshot();
+    await mount(initial);
+    fireEvent.change(screen.getByLabelText('Голос'), { target: { value: 'cedar' } });
+    fireEvent.change(screen.getByLabelText('Сочетание клавиш озвучивания'), { target: { value: ' Control + Alt + A ' } });
+    fireEvent.change(screen.getByLabelText('Профиль обработки текста'), { target: { value: 'markdown' } });
+    fireEvent.click(screen.getByLabelText('Автоматически вставлять результат'));
+    fireEvent.change(screen.getByLabelText('Сочетание для вставки'), { target: { value: 'ctrl_shift_v' } });
+    emit({ ...initial, settings: { ...initial.settings, model: 'whisper-1', tts_voice: 'alloy' } });
+    expect(screen.getByLabelText('Голос')).toHaveProperty('value', 'cedar');
+    expect(screen.getByLabelText('Сочетание клавиш озвучивания')).toHaveProperty('value', ' Control + Alt + A ');
+    expect(screen.getByLabelText('Профиль обработки текста')).toHaveProperty('value', 'markdown');
+    expect(screen.getByLabelText('Сочетание для вставки')).toHaveProperty('value', 'ctrl_shift_v');
+    const settings: Settings = {
+      ...initial.settings,
+      tts_voice: 'cedar',
+      tts_shortcut: 'Control+Alt+A',
+      auto_paste: true,
+      paste_shortcut: 'ctrl_shift_v',
+      polish: { ...initial.settings.polish, profile_id: 'markdown' },
+    };
+    const saved = { ...initial, settings };
+    backend.saveSettings.mockResolvedValue(saved);
+    backend.getSnapshot.mockResolvedValue(saved);
+    fireEvent.click(screen.getByRole('button', { name: 'Сохранить настройки' }));
+    await screen.findByText('Настройки сохранены.');
+    expect(backend.saveSettings).toHaveBeenCalledExactlyOnceWith(settings);
+    expect(screen.getByRole('button', { name: 'Сохранить настройки' })).toHaveProperty('disabled', true);
+    emit({ ...saved, settings: { ...settings, tts_voice: 'marin' } });
+    expect(screen.getByLabelText('Голос')).toHaveProperty('value', 'marin');
+  });
+
+  it('rejects equivalent recording and speech shortcuts before invoking the backend', async () => {
+    await mount();
+    fireEvent.change(screen.getByLabelText('Сочетание клавиш'), { target: { value: 'Super+Control+A' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Сохранить настройки' }));
+    expect(await screen.findByText(/не должны совпадать/)).toBeTruthy();
+    expect(backend.saveSettings).not.toHaveBeenCalled();
   });
 
   it('preserves an existing custom model while changing another setting', async () => {

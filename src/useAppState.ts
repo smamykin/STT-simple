@@ -10,6 +10,7 @@ const ACTION_LABELS: Record<Action, string> = {
   set_api_key: 'Не удалось сохранить API-ключ',
   delete_api_key: 'Не удалось удалить API-ключ',
   toggle_recording: 'Не удалось начать или остановить запись',
+  toggle_speech: 'Не удалось начать или остановить озвучивание',
   cancel_recording: 'Не удалось отменить запись',
   reset_statistics: 'Не удалось сбросить статистику',
   copy_last_transcript: 'Не удалось скопировать текст',
@@ -110,9 +111,11 @@ export function useAppState() {
     const connection = connectionRef.current;
     if (!connection?.ready || pendingRef.current) return false;
     if (!canRunAction(action, snapshotRef.current)) {
-      setActionError(action === 'toggle_recording' && !snapshotRef.current?.has_api_key
+      const needsKey = (action === 'toggle_recording' || action === 'toggle_speech')
+        && snapshotRef.current?.phase === 'idle' && !snapshotRef.current.has_api_key;
+      setActionError(needsKey
         ? 'Сначала сохраните API-ключ OpenAI в настройках.'
-        : 'Действие сейчас недоступно. Дождитесь завершения обработки записи.');
+        : 'Действие сейчас недоступно. Дождитесь завершения текущей операции.');
       return false;
     }
     const now = performance.now();

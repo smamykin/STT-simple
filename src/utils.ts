@@ -19,6 +19,9 @@ export function createPolishProfileId(profiles: PolishProfile[]): string {
 }
 
 export const DEFAULT_MODEL = 'gpt-transcribe';
+export const DEFAULT_TTS_MODEL = 'gpt-4o-mini-tts';
+export const DEFAULT_TTS_VOICE = 'marin';
+
 export const MODELS = [
   { value: DEFAULT_MODEL, label: 'GPT Transcribe — рекомендован OpenAI' },
   { value: 'gpt-4o-mini-transcribe', label: 'GPT-4o mini Transcribe' },
@@ -26,6 +29,27 @@ export const MODELS = [
   { value: 'gpt-4o-transcribe', label: 'GPT-4o Transcribe' },
   { value: 'gpt-4o-transcribe-diarize', label: 'GPT-4o Transcribe Diarize — только текст' },
   { value: 'whisper-1', label: 'Whisper 1' },
+] as const;
+
+export const TTS_MODELS = [
+  { value: DEFAULT_TTS_MODEL, label: 'GPT-4o mini TTS — рекомендован OpenAI' },
+] as const;
+
+// Known built-in Speech API voices. Availability still depends on the selected model and account.
+export const TTS_VOICES = [
+  { value: 'marin', label: 'Marin — рекомендован OpenAI' },
+  { value: 'cedar', label: 'Cedar — рекомендован OpenAI' },
+  { value: 'alloy', label: 'Alloy' },
+  { value: 'ash', label: 'Ash' },
+  { value: 'ballad', label: 'Ballad' },
+  { value: 'coral', label: 'Coral' },
+  { value: 'echo', label: 'Echo' },
+  { value: 'fable', label: 'Fable' },
+  { value: 'nova', label: 'Nova' },
+  { value: 'onyx', label: 'Onyx' },
+  { value: 'sage', label: 'Sage' },
+  { value: 'shimmer', label: 'Shimmer' },
+  { value: 'verse', label: 'Verse' },
 ] as const;
 
 export function formatDuration(seconds: number): string {
@@ -47,6 +71,10 @@ export function statusText(phase: Phase): string {
   switch (phase) {
     case 'idle':
       return 'Готово к диктовке';
+    case 'synthesizing':
+      return 'Создаём речь';
+    case 'playing':
+      return 'Воспроизводим речь';
     case 'recording':
       return 'Идёт запись';
     case 'transcribing':
@@ -61,6 +89,10 @@ export function canRunAction(action: Action, snapshot: Snapshot | null): boolean
   switch (action) {
     case 'toggle_recording':
       return snapshot.phase === 'recording'
+        || ((snapshot.phase === 'idle' || snapshot.phase === 'synthesizing' || snapshot.phase === 'playing')
+          && snapshot.has_api_key);
+    case 'toggle_speech':
+      return snapshot.phase === 'synthesizing' || snapshot.phase === 'playing'
         || (snapshot.phase === 'idle' && snapshot.has_api_key);
     case 'cancel_recording':
       return snapshot.phase === 'recording';
@@ -73,14 +105,56 @@ export function canRunAction(action: Action, snapshot: Snapshot | null): boolean
   }
 }
 
-const MODIFIERS = new Set([
-  'control', 'ctrl', 'alt', 'option', 'shift', 'super', 'meta', 'command', 'cmd',
-]);
+const MODIFIER_ALIASES: Record<string, string> = {
+  control: 'control',
+  ctrl: 'control',
+  alt: 'alt',
+  option: 'alt',
+  shift: 'shift',
+  super: 'super',
+  meta: 'super',
+  command: 'super',
+  cmd: 'super',
+};
+const MODIFIERS = new Set(Object.keys(MODIFIER_ALIASES));
+const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+
+function normalizeShortcut(shortcut: string): string {
+  return shortcut.split('+').map((part) => part.trim()).join('+');
+}
+
+function shortcutIdentity(shortcut: string): string | null {
+  const parts = shortcut.split('+').map((part) => part.trim().toLowerCase());
+  const key = parts.at(-1);
+  const modifiers = parts.slice(0, -1).map((modifier) => MODIFIER_ALIASES[modifier]);
+  if (parts.some((part) => !part) || !key || MODIFIERS.has(key)
+    || modifiers.length === 0 || modifiers.some((modifier) => !modifier)) return null;
+  return `${[...modifiers].sort().join('+')}+${key}`;
+}
+
+export function formatShortcutHint(shortcut: string, mac: boolean): string {
+  if (!mac) return shortcut;
+  const names: Record<string, string> = {
+    control: 'Ctrl',
+    ctrl: 'Ctrl',
+    super: 'Cmd',
+    meta: 'Cmd',
+    command: 'Cmd',
+    cmd: 'Cmd',
+    alt: 'Option',
+    option: 'Option',
+    shift: 'Shift',
+  };
+  return shortcut.split('+').map((part) => names[part.trim().toLowerCase()] ?? part.trim()).join('+');
+}
 
 export function normalizeSettings(settings: Settings): Settings {
   return {
-    shortcut: settings.shortcut.split('+').map((part) => part.trim()).join('+'),
+    shortcut: normalizeShortcut(settings.shortcut),
     model: settings.model.trim(),
+    tts_shortcut: normalizeShortcut(settings.tts_shortcut),
+    tts_model: settings.tts_model.trim(),
+    tts_voice: settings.tts_voice.trim(),
     input_device: settings.input_device,
     auto_paste: settings.auto_paste,
     paste_shortcut: settings.paste_shortcut,
@@ -93,6 +167,21 @@ export function normalizeSettings(settings: Settings): Settings {
     },
   };
 }
+
+
+function validateShortcut(shortcut: string, purpose: 'распознавания' | 'озвучивания'): string | null {
+  const value = shortcut.trim();
+  if (!value || value.length > 128 || /[\u0000-\u001f\u007f]/.test(value)) {
+    return `Укажите сочетание клавиш ${purpose}, например Super+R или Control+Super+R.`;
+  }
+  const parts = value.split('+').map((part) => part.trim().toLowerCase());
+  const modifiers = parts.slice(0, -1);
+  if (!shortcutIdentity(value) || new Set(modifiers.map((modifier) => MODIFIER_ALIASES[modifier])).size !== modifiers.length) {
+    return 'Используйте модификатор и одну клавишу, например Super+R. Не повторяйте модификаторы.';
+  }
+  return null;
+}
+
 
 export function validateSettings(settings: Settings, builtinIds: readonly string[] = BUILTIN_POLISH_IDS): string | null {
   const polish = settings.polish;
@@ -121,23 +210,24 @@ export function validateSettings(settings: Settings, builtinIds: readonly string
   if (polish.profile_id !== null && !ids.has(polish.profile_id)) {
     return 'Выберите существующий профиль обработки текста или выключите обработку.';
   }
-  if (settings.model.trim() !== settings.model || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(settings.model)) {
+  if (settings.model.trim() !== settings.model || !ID_PATTERN.test(settings.model)) {
     return 'Укажите ID модели OpenAI: до 128 символов, латинские буквы, цифры, точка, дефис, подчёркивание или двоеточие. Без пробелов.';
+  }
+  if (settings.tts_model.trim() !== settings.tts_model || !ID_PATTERN.test(settings.tts_model)) {
+    return 'Укажите ID TTS-модели OpenAI: до 128 символов, латинские буквы, цифры, точка, дефис, подчёркивание или двоеточие. Без пробелов.';
+  }
+  if (settings.tts_voice.trim() !== settings.tts_voice || !ID_PATTERN.test(settings.tts_voice)) {
+    return 'Укажите ID голоса OpenAI: до 128 символов, латинские буквы, цифры, точка, дефис, подчёркивание или двоеточие. Без пробелов.';
   }
   if (settings.input_device !== null && !settings.input_device.trim()) {
     return 'Выберите микрофон или системное устройство по умолчанию.';
   }
-  const shortcut = settings.shortcut.trim();
-  if (!shortcut || shortcut.length > 128 || /[\u0000-\u001f\u007f]/.test(shortcut)) {
-    return 'Укажите сочетание клавиш, например Super+R или Control+Super+R.';
-  }
-  const parts = shortcut.split('+').map((part) => part.trim().toLowerCase());
-  const key = parts.at(-1);
-  const modifiers = parts.slice(0, -1);
-  if (parts.some((part) => !part) || !key || MODIFIERS.has(key)
-    || modifiers.length === 0 || modifiers.some((part) => !MODIFIERS.has(part))
-    || new Set(modifiers).size !== modifiers.length) {
-    return 'Используйте модификатор и одну клавишу, например Super+R. Не повторяйте модификаторы.';
+  const sttShortcutError = validateShortcut(settings.shortcut, 'распознавания');
+  if (sttShortcutError) return sttShortcutError;
+  const ttsShortcutError = validateShortcut(settings.tts_shortcut, 'озвучивания');
+  if (ttsShortcutError) return ttsShortcutError;
+  if (shortcutIdentity(settings.shortcut) === shortcutIdentity(settings.tts_shortcut)) {
+    return 'Сочетания клавиш распознавания и озвучивания не должны совпадать.';
   }
   // The backend is authoritative for platform-specific shortcut parsing.
   return null;
@@ -146,6 +236,9 @@ export function validateSettings(settings: Settings, builtinIds: readonly string
 export function settingsEqual(left: Settings, right: Settings): boolean {
   return left.shortcut === right.shortcut
     && left.model === right.model
+    && left.tts_shortcut === right.tts_shortcut
+    && left.tts_model === right.tts_model
+    && left.tts_voice === right.tts_voice
     && left.input_device === right.input_device
     && left.auto_paste === right.auto_paste
     && left.paste_shortcut === right.paste_shortcut

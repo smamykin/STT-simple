@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { makeSnapshot } from './testFixtures';
 import type { Action, Settings } from './types';
 import {
-  MODELS, canRunAction, createPolishProfileId, errorMessage, formatDuration, isBusy, normalizeSettings,
-  settingsEqual, statusText, validateApiKey, validateSettings,
+  MODELS, TTS_MODELS, TTS_VOICES, canRunAction, createPolishProfileId, errorMessage, formatDuration,
+  formatShortcutHint, isBusy, normalizeSettings, settingsEqual, statusText, validateApiKey, validateSettings,
 } from './utils';
 
 const settings: Settings = {
@@ -13,6 +13,9 @@ const settings: Settings = {
 const configurationActions: Action[] = [
   'save_settings', 'set_api_key', 'delete_api_key', 'reset_statistics', 'quit_app',
 ];
+
+const sttPhases = ['recording', 'transcribing', 'polishing'] as const;
+const ttsPhases = ['synthesizing', 'playing'] as const;
 
 describe('formatDuration', () => {
   it.each([
@@ -38,13 +41,31 @@ describe('status and action guards', () => {
     expect(canRunAction('toggle_recording', makeSnapshot({ phase: 'recording', has_api_key: false }))).toBe(true);
   });
 
+  it.each(ttsPhases)('allows recording to interrupt %s only when a key is present', (phase) => {
+    expect(canRunAction('toggle_recording', makeSnapshot({ phase, has_api_key: true }))).toBe(true);
+    expect(canRunAction('toggle_recording', makeSnapshot({ phase, has_api_key: false }))).toBe(false);
+  });
+
+  it('starts speech only while idle with a key', () => {
+    expect(canRunAction('toggle_speech', makeSnapshot())).toBe(true);
+    expect(canRunAction('toggle_speech', makeSnapshot({ has_api_key: false }))).toBe(false);
+  });
+
+  it.each(ttsPhases)('stops speech during %s even when the key is missing', (phase) => {
+    expect(canRunAction('toggle_speech', makeSnapshot({ phase, has_api_key: false }))).toBe(true);
+  });
+
+  it.each(sttPhases)('rejects speech during %s', (phase) => {
+    expect(canRunAction('toggle_speech', makeSnapshot({ phase }))).toBe(false);
+  });
+
   it('does not enable actions without an initial snapshot', () => {
-    for (const action of [...configurationActions, 'toggle_recording', 'cancel_recording', 'copy_last_transcript', 'retry_polish'] as Action[]) {
+    for (const action of [...configurationActions, 'toggle_recording', 'toggle_speech', 'cancel_recording', 'copy_last_transcript', 'retry_polish'] as Action[]) {
       expect(canRunAction(action, null)).toBe(false);
     }
   });
 
-  it.each(['recording', 'transcribing', 'polishing'] as const)('locks settings, key and statistics during %s', (phase) => {
+  it.each([...sttPhases, ...ttsPhases])('locks settings, key and statistics during %s', (phase) => {
     expect(isBusy(phase)).toBe(true);
     for (const action of configurationActions) {
       expect(canRunAction(action, makeSnapshot({ phase }))).toBe(false);
@@ -53,7 +74,7 @@ describe('status and action guards', () => {
 
   it('allows cancellation only during recording', () => {
     expect(canRunAction('cancel_recording', makeSnapshot({ phase: 'recording' }))).toBe(true);
-    for (const phase of ['idle', 'transcribing', 'polishing'] as const) {
+    for (const phase of ['idle', 'transcribing', 'polishing', 'synthesizing', 'playing'] as const) {
       expect(canRunAction('cancel_recording', makeSnapshot({ phase }))).toBe(false);
     }
   });
@@ -64,47 +85,86 @@ describe('status and action guards', () => {
     expect(canRunAction('copy_last_transcript', makeSnapshot({ last_transcript: 'Текст' }))).toBe(true);
   });
 
-  it.each(['recording', 'transcribing', 'polishing'] as const)('rejects copying an existing transcript during %s', (phase) => {
+  it.each([...sttPhases, ...ttsPhases])('rejects copying an existing transcript during %s', (phase) => {
     expect(canRunAction('copy_last_transcript', makeSnapshot({ phase, last_transcript: 'Текст' }))).toBe(false);
   });
 
-  it('uses distinct Russian status labels for transcription and polishing', () => {
+  it('uses distinct Russian status labels for every phase', () => {
     expect(isBusy('idle')).toBe(false);
     expect(statusText('idle')).toBe('Готово к диктовке');
     expect(statusText('recording')).toBe('Идёт запись');
     expect(statusText('transcribing')).toBe('Обработка записи');
     expect(statusText('polishing')).toBe('Обработка текста');
+    expect(statusText('synthesizing')).toBe('Создаём речь');
+    expect(statusText('playing')).toBe('Воспроизводим речь');
   });
 });
 
 describe('settings validation', () => {
-  it('accepts all supported models and the platform default shortcuts', () => {
+  it('accepts all suggested models, voices and platform default shortcuts', () => {
     for (const model of MODELS) {
       for (const shortcut of ['Super+R', 'Control+Super+R']) {
         expect(validateSettings({ ...settings, model: model.value, shortcut })).toBeNull();
       }
     }
+    for (const model of TTS_MODELS) {
+      expect(validateSettings({ ...settings, tts_model: model.value })).toBeNull();
+    }
+    for (const voice of TTS_VOICES) {
+      expect(validateSettings({ ...settings, tts_voice: voice.value })).toBeNull();
+    }
+    expect(TTS_VOICES.some((voice) => voice.value === 'marin')).toBe(true);
   });
 
-  it.each(['ctrl_v', 'ctrl_shift_v'] as const)('normalizes whitespace without replacing the device or paste chord %s', (paste_shortcut) => {
-    expect(normalizeSettings({ ...settings, shortcut: ' Control + Super + R ', model: ' whisper-1 ', input_device: 'mic-1', auto_paste: true, paste_shortcut }))
-      .toEqual({ ...settings, shortcut: 'Control+Super+R', model: 'whisper-1', input_device: 'mic-1', auto_paste: true, paste_shortcut });
+  it.each(['ctrl_v', 'ctrl_shift_v'] as const)('normalizes whitespace in every textual setting without replacing the device or paste chord %s', (paste_shortcut) => {
+    expect(normalizeSettings({
+      ...settings,
+      shortcut: ' Control + Super + R ',
+      model: ' whisper-1 ',
+      tts_shortcut: ' Control + Super + A ',
+      tts_model: ' gpt-4o-mini-tts ',
+      tts_voice: ' marin ',
+      input_device: 'mic-1',
+      auto_paste: true,
+      paste_shortcut,
+    })).toEqual({
+      ...settings,
+      shortcut: 'Control+Super+R',
+      model: 'whisper-1',
+      tts_shortcut: 'Control+Super+A',
+      tts_model: 'gpt-4o-mini-tts',
+      tts_voice: 'marin',
+      input_device: 'mic-1',
+      auto_paste: true,
+      paste_shortcut,
+    });
   });
 
   it.each(['', ' ', 'R', 'Super', 'Super+', 'Super++R', 'Super+Super+R', 'Unknown+R', 'Super+\nR'])
     ('rejects invalid shortcut %j', (shortcut) => {
       expect(validateSettings({ ...settings, shortcut })).not.toBeNull();
+      expect(validateSettings({ ...settings, tts_shortcut: shortcut })).not.toBeNull();
     });
 
-  it('accepts custom model IDs and snapshots without claiming API compatibility', () => {
-    for (const model of ['gpt-transcribe', 'gpt-transcribe-future-snapshot', 'gpt-4o-mini-transcribe-2025-12-15', 'ft:custom_model.v2']) {
-      expect(validateSettings({ ...settings, model })).toBeNull();
-    }
+  it('rejects equivalent STT and TTS shortcuts regardless of modifier order or aliases', () => {
+    expect(validateSettings({ ...settings, shortcut: 'Super+Control+A' })).toContain('не должны совпадать');
+    expect(validateSettings({ ...settings, shortcut: 'Cmd+Ctrl+A' })).toContain('не должны совпадать');
   });
 
-  it.each(['', ' ', 'gpt transcribe', 'gpt/transcribe', 'gpt\ntranscribe', 'gpt-transcribe\n', 'gpt-transcribe\r', '-invalid', 'модель', 'x'.repeat(129)])
-    ('rejects malformed model ID %j', (model) => {
-      expect(validateSettings({ ...settings, model })).not.toBeNull();
+  it('accepts custom model and voice IDs without claiming API compatibility', () => {
+    expect(validateSettings({
+      ...settings,
+      model: 'ft:custom_model.v2',
+      tts_model: 'future-tts-snapshot',
+      tts_voice: 'voice_1.0:preview',
+    })).toBeNull();
+  });
+
+  it.each(['', ' ', 'gpt speech', 'gpt/speech', 'gpt\nspeech', '-invalid', 'модель', 'x'.repeat(129)])
+    ('rejects malformed IDs %j', (value) => {
+      expect(validateSettings({ ...settings, model: value })).not.toBeNull();
+      expect(validateSettings({ ...settings, tts_model: value })).not.toBeNull();
+      expect(validateSettings({ ...settings, tts_voice: value })).not.toBeNull();
     });
 
   it('rejects empty device IDs', () => {
@@ -113,11 +173,25 @@ describe('settings validation', () => {
 
   it('compares all settings fields', () => {
     expect(settingsEqual(settings, { ...settings })).toBe(true);
-    expect(settingsEqual(settings, { ...settings, shortcut: 'Alt+R' })).toBe(false);
-    expect(settingsEqual(settings, { ...settings, model: 'whisper-1' })).toBe(false);
-    expect(settingsEqual(settings, { ...settings, input_device: 'mic-1' })).toBe(false);
-    expect(settingsEqual(settings, { ...settings, auto_paste: true })).toBe(false);
-    expect(settingsEqual(settings, { ...settings, paste_shortcut: 'ctrl_shift_v' })).toBe(false);
+    for (const changed of [
+      { shortcut: 'Alt+R' },
+      { model: 'whisper-1' },
+      { tts_shortcut: 'Alt+A' },
+      { tts_model: 'custom-tts' },
+      { tts_voice: 'cedar' },
+      { input_device: 'mic-1' },
+      { auto_paste: true },
+      { paste_shortcut: 'ctrl_shift_v' as const },
+    ]) {
+      expect(settingsEqual(settings, { ...settings, ...changed })).toBe(false);
+    }
+  });
+
+  it('formats shortcut hints for macOS without changing stored settings', () => {
+    expect(formatShortcutHint('Control+Super+A', true)).toBe('Ctrl+Cmd+A');
+    expect(formatShortcutHint('Alt+Shift+Super+R', true)).toBe('Option+Shift+Cmd+R');
+    expect(formatShortcutHint(settings.tts_shortcut, false)).toBe(settings.tts_shortcut);
+    expect(settings.tts_shortcut).toBe('Control+Super+A');
   });
 });
 
@@ -188,7 +262,7 @@ describe('polishing settings and retry guards', () => {
     expect(canRunAction('retry_polish', ready)).toBe(true);
     expect(canRunAction('retry_polish', { ...ready, can_retry_polish: false })).toBe(false);
     expect(canRunAction('retry_polish', { ...ready, has_api_key: false })).toBe(false);
-    for (const phase of ['recording', 'transcribing', 'polishing'] as const) {
+    for (const phase of [...sttPhases, ...ttsPhases]) {
       expect(canRunAction('retry_polish', { ...ready, phase })).toBe(false);
     }
   });

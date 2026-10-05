@@ -1,4 +1,4 @@
-export type Phase = 'idle' | 'recording' | 'transcribing' | 'polishing';
+export type Phase = 'idle' | 'synthesizing' | 'playing' | 'recording' | 'transcribing' | 'polishing';
 
 export interface PolishProfile {
   id: string;
@@ -16,6 +16,9 @@ export interface PolishSettings {
 export interface Settings {
   shortcut: string;
   model: string;
+  tts_shortcut: string;
+  tts_model: string;
+  tts_voice: string;
   input_device: string | null;
   auto_paste: boolean;
   paste_shortcut: 'ctrl_v' | 'ctrl_shift_v';
@@ -42,6 +45,9 @@ export interface Snapshot {
   hotkey_mode: 'native' | 'system';
   hotkey_command: string | null;
   hotkey_message: string | null;
+  tts_hotkey_available: boolean;
+  tts_hotkey_command: string | null;
+  tts_hotkey_message: string | null;
   recording_seconds: number;
 }
 
@@ -56,6 +62,7 @@ export type Action =
   | 'set_api_key'
   | 'delete_api_key'
   | 'toggle_recording'
+  | 'toggle_speech'
   | 'cancel_recording'
   | 'reset_statistics'
   | 'copy_last_transcript'

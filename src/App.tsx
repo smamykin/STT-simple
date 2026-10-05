@@ -5,7 +5,8 @@ import type { Settings } from './types';
 import { useAppState } from './useAppState';
 import { PolishSettingsFields } from './PolishSettingsFields';
 import {
-  DEFAULT_MODEL, MODELS, canRunAction, formatDuration, isBusy, normalizeSettings, settingsEqual, statusText,
+  DEFAULT_MODEL, DEFAULT_TTS_MODEL, DEFAULT_TTS_VOICE, MODELS, TTS_MODELS, TTS_VOICES,
+  canRunAction, formatDuration, formatShortcutHint, isBusy, normalizeSettings, settingsEqual, statusText,
   validateApiKey, validateSettings,
 } from './utils';
 
@@ -47,10 +48,19 @@ export default function App() {
     deviceError, refreshDevices, runAction, retry,
   } = useAppState();
   const [draft, setDraft] = useState<Settings>({
-    shortcut: '', model: DEFAULT_MODEL, input_device: null, auto_paste: false, paste_shortcut: 'ctrl_v',
+    shortcut: '',
+    model: DEFAULT_MODEL,
+    tts_shortcut: '',
+    tts_model: DEFAULT_TTS_MODEL,
+    tts_voice: DEFAULT_TTS_VOICE,
+    input_device: null,
+    auto_paste: false,
+    paste_shortcut: 'ctrl_v',
     polish: { profile_id: null, model: 'gpt-6-luna', effort: null, custom_profiles: [] },
   });
   const [manualModel, setManualModel] = useState(false);
+  const [manualTtsModel, setManualTtsModel] = useState(false);
+  const [manualTtsVoice, setManualTtsVoice] = useState(false);
   const [apiKey, setApiKey] = useState('');
   const [keyGeneration, setKeyGeneration] = useState(0);
   const [settingsError, setSettingsError] = useState<string | null>(null);
@@ -68,6 +78,8 @@ export default function App() {
     if (dirtyDraft.current || (previous && settingsEqual(previous, savedSettings))) return;
     setDraft(savedSettings);
     setManualModel(!MODELS.some((model) => model.value === savedSettings.model));
+    setManualTtsModel(!TTS_MODELS.some((model) => model.value === savedSettings.tts_model));
+    setManualTtsVoice(!TTS_VOICES.some((voice) => voice.value === savedSettings.tts_voice));
     setSettingsError(null);
   }, [savedSettings]);
 
@@ -83,6 +95,9 @@ export default function App() {
   const locked = !snapshot || !connected || busy || pending !== null;
   const recording = snapshot?.phase === 'recording';
   const processing = snapshot?.phase === 'transcribing' || snapshot?.phase === 'polishing';
+  const synthesizing = snapshot?.phase === 'synthesizing';
+  const playing = snapshot?.phase === 'playing';
+  const speaking = synthesizing || playing;
   const normalized = normalizeSettings(draft);
   const settingsChanged = snapshot ? !settingsEqual(normalized, snapshot.settings) : false;
   const missingDevice = draft.input_device !== null
@@ -91,8 +106,10 @@ export default function App() {
   const mac = /Macintosh|Mac OS X/i.test(navigator.userAgent);
   const systemHotkey = snapshot?.hotkey_mode === 'system';
   const customModel = manualModel || !MODELS.some((model) => model.value === draft.model);
-  const toggleDisabled = !snapshot || !connected || pending !== null || processing
-    || (!recording && !snapshot.has_api_key);
+  const customTtsModel = manualTtsModel || !TTS_MODELS.some((model) => model.value === draft.tts_model);
+  const customTtsVoice = manualTtsVoice || !TTS_VOICES.some((voice) => voice.value === draft.tts_voice);
+  const toggleDisabled = !connected || pending !== null || !canRunAction('toggle_recording', snapshot);
+  const speechDisabled = !connected || pending !== null || !canRunAction('toggle_speech', snapshot);
 
   async function saveSettings(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -175,6 +192,7 @@ export default function App() {
             {recording ? 'Нажмите «Остановить», чтобы распознать запись.'
               : snapshot?.phase === 'polishing' ? 'Обрабатываем распознанный текст в OpenAI.'
               : processing ? 'Распознаём вашу запись. Это может занять некоторое время.'
+              : speaking ? 'Начало записи остановит текущее озвучивание.'
               : snapshot && !snapshot.has_api_key ? 'Сохраните API-ключ OpenAI, чтобы начать.'
               : 'Одна кнопка — от голоса к тексту.'}
           </p>
@@ -194,13 +212,41 @@ export default function App() {
           </div>
           {snapshot && (
             <p className="shortcut-hint">
-              Сочетание: <kbd>{snapshot.settings.shortcut}</kbd>
+              Сочетание: <kbd>{formatShortcutHint(snapshot.settings.shortcut, mac)}</kbd>
               <span>{systemHotkey
                 ? snapshot.hotkey_available ? ' · настроено в GNOME' : ' · не настроено в GNOME'
                 : snapshot.hotkey_available ? ' · зарегистрировано' : ' · не удалось зарегистрировать'}</span>
             </p>
           )}
         </div>
+      </section>
+
+      <section className={`card speech-card${speaking ? ' is-speaking' : ''}`} aria-labelledby="speech-heading">
+        <div className="section-heading">
+          <h2 id="speech-heading">Озвучивание буфера</h2>
+          <span className={`status-badge${speaking ? ' status-speaking' : ''}`} role="status">
+            <span className="status-dot" aria-hidden="true" />
+            {synthesizing ? 'Создаём речь' : playing ? 'Воспроизводим речь' : 'Готово к озвучиванию'}
+          </span>
+        </div>
+        <p className="section-description">Текст из буфера обмена отправляется в OpenAI. Голос сгенерирован ИИ и не является голосом человека. Использование API оплачивается вашим аккаунтом OpenAI; приложение не рассчитывает стоимость.</p>
+        <div className="speech-actions">
+          <button className={`button button-primary${speaking ? ' button-stop' : ''}`}
+            disabled={speechDisabled}
+            onClick={() => void runAction('toggle_speech', backend.toggleSpeech)}>
+            <span className={speaking ? 'stop-icon' : 'speak-icon'} aria-hidden="true" />
+            {pending === 'toggle_speech' ? 'Подождите…' : speaking ? 'Остановить' : 'Озвучить буфер'}
+          </button>
+        </div>
+        {snapshot && (
+          <p className="shortcut-hint">
+            Сочетание: <kbd>{formatShortcutHint(snapshot.settings.tts_shortcut, mac)}</kbd>
+            <span>{systemHotkey
+              ? ' · на Wayland назначается вручную'
+              : snapshot.tts_hotkey_available ? ' · зарегистрировано' : ' · не удалось зарегистрировать'}</span>
+          </p>
+        )}
+        {(recording || processing) && <p className="help lock-hint">Озвучивание доступно после завершения записи и распознавания.</p>}
       </section>
 
       <section className="card transcript-card" aria-labelledby="transcript-heading">
@@ -245,10 +291,10 @@ export default function App() {
 
       <div className="settings-grid">
         <section className="card" aria-labelledby="settings-heading">
-          <div className="section-heading"><h2 id="settings-heading">Настройки</h2><span className="section-meta">Распознавание</span></div>
+          <div className="section-heading"><h2 id="settings-heading">Настройки</h2><span className="section-meta">Распознавание и озвучивание</span></div>
           <form onSubmit={(event) => void saveSettings(event)}>
             <fieldset disabled={locked}>
-              <legend className="visually-hidden">Микрофон, модель и сочетание клавиш</legend>
+              <legend className="visually-hidden">Микрофон, модели, голос и сочетания клавиш</legend>
               <div className="field">
                 <div className="field-heading">
                   <label htmlFor="microphone">Микрофон</label>
@@ -298,10 +344,64 @@ export default function App() {
                   placeholder="Super+R" autoComplete="off" aria-describedby="shortcut-help"
                   aria-invalid={Boolean(settingsError)}
                   onChange={(event) => updateDraft('shortcut', event.target.value)} />
-                <p className="help" id="shortcut-help">Например, <kbd>Super+R</kbd> или
-                  <kbd>Control+Super+R</kbd>. {mac && 'На macOS Super означает Command. '}{systemHotkey
-                    ? 'После сохранения приложение создаст или обновит своё системное сочетание в GNOME. Чужие сочетания не перезаписываются.'
+                <p className="help" id="shortcut-help">Например, <kbd>{formatShortcutHint('Super+R', mac)}</kbd> или
+                  <kbd>{formatShortcutHint('Control+Super+R', mac)}</kbd>. {systemHotkey
+                    ? 'После сохранения приложение создаст или обновит только сочетание диктовки в GNOME. Чужие сочетания не перезаписываются.'
                     : 'После сохранения приложение зарегистрирует сочетание в системе.'}</p>
+              </div>
+              <div className="settings-subsection" aria-labelledby="tts-settings-heading">
+                <h3 id="tts-settings-heading">Озвучивание</h3>
+                <div className="field">
+                  <label htmlFor="tts-model">TTS-модель</label>
+                  <select id="tts-model" value={customTtsModel ? '__custom__' : draft.tts_model}
+                    aria-describedby="tts-model-help" onChange={(event) => {
+                      const custom = event.target.value === '__custom__';
+                      setManualTtsModel(custom);
+                      if (!custom) updateDraft('tts_model', event.target.value);
+                    }}>
+                    {TTS_MODELS.map((model) => <option key={model.value} value={model.value}>{model.label}</option>)}
+                    <option value="__custom__">Свой ID TTS-модели…</option>
+                  </select>
+                  {customTtsModel && <>
+                    <label htmlFor="tts-model-id">ID TTS-модели OpenAI</label>
+                    <input id="tts-model-id" value={draft.tts_model} maxLength={128} spellCheck={false}
+                      autoComplete="off" autoCapitalize="none" placeholder="gpt-4o-mini-tts"
+                      aria-describedby="tts-model-help" onChange={(event) => updateDraft('tts_model', event.target.value)} />
+                  </>}
+                  <p className="help" id="tts-model-help">GPT-4o mini TTS — известная модель Speech API.
+                    Можно указать другой ID; список служит подсказкой, а доступность определяет OpenAI.</p>
+                </div>
+                <div className="field">
+                  <label htmlFor="tts-voice">Голос</label>
+                  <select id="tts-voice" value={customTtsVoice ? '__custom__' : draft.tts_voice}
+                    aria-describedby="tts-voice-help" onChange={(event) => {
+                      const custom = event.target.value === '__custom__';
+                      setManualTtsVoice(custom);
+                      if (!custom) updateDraft('tts_voice', event.target.value);
+                    }}>
+                    {TTS_VOICES.map((voice) => <option key={voice.value} value={voice.value}>{voice.label}</option>)}
+                    <option value="__custom__">Свой ID голоса…</option>
+                  </select>
+                  {customTtsVoice && <>
+                    <label htmlFor="tts-voice-id">ID голоса OpenAI</label>
+                    <input id="tts-voice-id" value={draft.tts_voice} maxLength={128} spellCheck={false}
+                      autoComplete="off" autoCapitalize="none" placeholder="marin"
+                      aria-describedby="tts-voice-help" onChange={(event) => updateDraft('tts_voice', event.target.value)} />
+                  </>}
+                  <p className="help" id="tts-voice-help">Marin и Cedar рекомендованы OpenAI для лучшего качества.
+                    Доступность голоса зависит от модели; можно указать собственный ID.</p>
+                </div>
+                <div className="field">
+                  <label htmlFor="tts-shortcut">Сочетание клавиш озвучивания</label>
+                  <input id="tts-shortcut" value={draft.tts_shortcut} maxLength={128} spellCheck={false}
+                    placeholder="Control+Super+A" autoComplete="off" aria-describedby="tts-shortcut-help"
+                    aria-invalid={Boolean(settingsError)}
+                    onChange={(event) => updateDraft('tts_shortcut', event.target.value)} />
+                  <p className="help" id="tts-shortcut-help">Например, <kbd>{formatShortcutHint('Control+Super+A', mac)}</kbd>.
+                    {systemHotkey
+                      ? ' На Wayland назначьте показанную ниже команду --toggle-tts вручную; автоматическая регистрация GNOME применяется только к диктовке.'
+                      : ' После сохранения приложение зарегистрирует сочетание в системе.'}</p>
+                </div>
               </div>
               {(mac || linux) && (
                 <div className="field checkbox-field">
@@ -347,7 +447,7 @@ export default function App() {
           </form>
           {settingsError && <ErrorNotice title="Проверьте настройки" message={settingsError} />}
           {deviceError && <ErrorNotice title="Микрофоны недоступны" message={deviceError} />}
-          {busy && <p className="help lock-hint">Настройки доступны после завершения записи и обработки.</p>}
+          {busy && <p className="help lock-hint">Настройки доступны после завершения записи, обработки или озвучивания.</p>}
         </section>
 
         <section className="card" aria-labelledby="key-heading">
@@ -357,7 +457,7 @@ export default function App() {
               {snapshot ? snapshot.has_api_key ? 'Сохранён' : 'Не задан' : 'Проверка…'}
             </span>
           </div>
-          <p className="section-description">Для распознавания нужен ключ OpenAI. Аудиозапись отправляется в OpenAI выбранной моделью.</p>
+          <p className="section-description">Ключ OpenAI нужен для распознавания и озвучивания. Аудиозапись отправляется для распознавания; при озвучивании в OpenAI отправляется текст из буфера обмена.</p>
           <form onSubmit={(event) => void saveApiKey(event)} autoComplete="off">
             <fieldset disabled={locked}>
               <legend className="visually-hidden">Управление API-ключом OpenAI</legend>
@@ -394,10 +494,12 @@ export default function App() {
         </section>
       </div>
 
-      {snapshot && (systemHotkey || !snapshot.hotkey_available || snapshot.hotkey_message) && (
+      {snapshot && (systemHotkey || !snapshot.hotkey_available || snapshot.hotkey_message
+        || !snapshot.tts_hotkey_available || snapshot.tts_hotkey_message) && (
         <aside className="card hotkey-card" aria-labelledby="hotkey-heading">
           <h2 id="hotkey-heading">Системное сочетание клавиш</h2>
-          {snapshot?.hotkey_message && <p className="hotkey-message">{snapshot.hotkey_message}</p>}
+          {snapshot.hotkey_message && <p className="hotkey-message"><strong>Диктовка:</strong> {snapshot.hotkey_message}</p>}
+          {snapshot.tts_hotkey_message && <p className="hotkey-message"><strong>Озвучивание:</strong> {snapshot.tts_hotkey_message}</p>}
           {systemHotkey && <>
             <p>На Ubuntu GNOME/Wayland нажмите «Сохранить настройки», чтобы применить выбранное
               сочетание к системе. Команда для этой сборки:</p>
@@ -408,11 +510,19 @@ export default function App() {
               Она сохраняется после выхода и может запускать приложение. После перемещения бинарника
               сохраните настройки снова, чтобы обновить путь. В других Wayland-окружениях назначьте
               показанную команду вручную. Проверка не гарантирует отсутствие перехвата клавиш расширениями GNOME.</p>
+            <div className="wayland-tts">
+              <h3>Озвучивание на Wayland</h3>
+              <p>Назначьте сочетание <kbd>{formatShortcutHint(snapshot.settings.tts_shortcut, mac)}</kbd> вручную на команду:</p>
+              <code className="command">{snapshot.tts_hotkey_command ?? 'stt-simple --toggle-tts'}</code>
+              <p className="help">Автоматическая регистрация GNOME относится только к диктовке. TTS на Linux не проверен.</p>
+            </div>
           </>}
           {linux && <p className="help">Для работы в фоне сверните окно. В Linux закрытие окна тоже сворачивает его,
             а не скрывает в системный трей. Чтобы завершить приложение, нажмите «Выйти».</p>}
           {!systemHotkey && !snapshot.hotkey_available && <p className="help">Используйте кнопку записи.
             Проверьте, не занято ли сочетание другим приложением, и сохраните другое в настройках.</p>}
+          {!systemHotkey && !snapshot.tts_hotkey_available && <p className="help">Используйте кнопку «Озвучить буфер».
+            Проверьте, не занято ли сочетание озвучивания, и сохраните другое в настройках.</p>}
         </aside>
       )}
 
@@ -447,7 +557,7 @@ export default function App() {
           <div><dt>Количество записей</dt><dd>{snapshot ? new Intl.NumberFormat('ru-RU').format(snapshot.statistics.recordings) : '—'}</dd></div>
         </dl>
       </section>
-      <footer className="app-footer">Только диктовка. Ваш текст — без лишних шагов.</footer>
+      <footer className="app-footer">Диктовка и озвучивание — без лишних шагов.</footer>
     </main>
   );
 }
