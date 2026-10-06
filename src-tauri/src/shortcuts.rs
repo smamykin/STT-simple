@@ -37,15 +37,19 @@ fn verify_system(shortcut: &str) -> Result<(), String> {
     }
 }
 
-pub fn validate_pair(settings: &Settings) -> Result<[Shortcut; 2], String> {
-    let pair = [
+pub fn validate_all(settings: &Settings) -> Result<[Shortcut; 3], String> {
+    let shortcuts = [
         validate(&settings.shortcut)?,
         validate(&settings.tts_shortcut)?,
+        validate(&settings.polish_shortcut)?,
     ];
-    if pair[0] == pair[1] {
-        return Err("Сочетания клавиш распознавания и озвучивания не должны совпадать.".into());
+    if shortcuts[0] == shortcuts[1] || shortcuts[0] == shortcuts[2] || shortcuts[1] == shortcuts[2]
+    {
+        return Err(
+            "Сочетания клавиш распознавания, озвучивания и обработки не должны совпадать.".into(),
+        );
     }
-    Ok(pair)
+    Ok(shortcuts)
 }
 
 pub fn wayland_tts_command() -> String {
@@ -55,6 +59,13 @@ pub fn wayland_tts_command() -> String {
         .unwrap_or_else(|| "stt-simple --toggle-tts".into())
 }
 
+pub fn wayland_polish_command() -> String {
+    wayland_command()
+        .strip_suffix(" --toggle")
+        .map(|exe| format!("{exe} --cycle-polish"))
+        .unwrap_or_else(|| "stt-simple --cycle-polish".into())
+}
+
 pub fn update_tts_status(app: &AppHandle) {
     let runtime = app.state::<Runtime>();
     let mut data = runtime.data.lock().expect("application state poisoned");
@@ -62,15 +73,21 @@ pub fn update_tts_status(app: &AppHandle) {
         data.tts_hotkey_available = false;
         data.tts_hotkey_command = Some(wayland_tts_command());
         data.tts_hotkey_message = Some("Назначьте команду озвучивания вручную в системных сочетаниях клавиш. TTS на Linux не проверен.".into());
+        data.polish_hotkey_available = false;
+        data.polish_hotkey_command = Some(wayland_polish_command());
+        data.polish_hotkey_message = Some("Назначьте команду переключения профиля обработки вручную в системных сочетаниях клавиш. Переключение профиля на Linux не проверено.".into());
     } else {
         data.tts_hotkey_available = true;
         data.tts_hotkey_command = None;
         data.tts_hotkey_message = None;
+        data.polish_hotkey_available = true;
+        data.polish_hotkey_command = None;
+        data.polish_hotkey_message = None;
     }
 }
 
-pub fn retain_pressed(pressed: &mut HashSet<Shortcut>, pair: &[Shortcut; 2]) {
-    pressed.retain(|shortcut| pair.contains(shortcut));
+pub fn retain_pressed(pressed: &mut HashSet<Shortcut>, shortcuts: &[Shortcut; 3]) {
+    pressed.retain(|shortcut| shortcuts.contains(shortcut));
 }
 
 trait Registrations {
@@ -107,7 +124,7 @@ fn registration_error(message: &str, degraded: bool) -> String {
 fn replace_native(
     manager: &impl Registrations,
     old: &[Shortcut],
-    new: &[Shortcut; 2],
+    new: &[Shortcut],
 ) -> Result<(), String> {
     let mut added = Vec::new();
     for &shortcut in new {
@@ -152,14 +169,14 @@ pub fn initialize(app: &AppHandle) {
     let settings = runtime.snapshot().settings;
     update_tts_status(app);
     let results = if clipboard::is_wayland() {
-        [verify_system(&settings.shortcut), Ok(())]
+        [verify_system(&settings.shortcut), Ok(()), Ok(())]
     } else {
-        match validate_pair(&settings) {
-            Ok(pair) => match replace_native(&NativeRegistrations(app), &[], &pair) {
-                Ok(()) => [Ok(()), Ok(())],
-                Err(error) => [Err(error.clone()), Err(error)],
+        match validate_all(&settings) {
+            Ok(shortcuts) => match replace_native(&NativeRegistrations(app), &[], &shortcuts) {
+                Ok(()) => [Ok(()), Ok(()), Ok(())],
+                Err(error) => [Err(error.clone()), Err(error.clone()), Err(error)],
             },
-            Err(error) => [Err(error.clone()), Err(error)],
+            Err(error) => [Err(error.clone()), Err(error.clone()), Err(error)],
         }
     };
     let mut data = runtime.data.lock().expect("application state poisoned");
@@ -168,12 +185,15 @@ pub fn initialize(app: &AppHandle) {
     if !clipboard::is_wayland() {
         data.tts_hotkey_available = results[1].is_ok();
         data.tts_hotkey_message = results[1].as_ref().err().cloned();
+        data.polish_hotkey_available = results[2].is_ok();
+        data.polish_hotkey_command = None;
+        data.polish_hotkey_message = results[2].as_ref().err().cloned();
     }
 }
 
 // Acquire the entire new pair before releasing any old registration, including swaps.
 pub async fn replace(app: &AppHandle, old: &Settings, new: &Settings) -> Result<(), String> {
-    let new_pair = validate_pair(new)?;
+    let new_shortcuts = validate_all(new)?;
     if clipboard::is_wayland() {
         #[cfg(target_os = "linux")]
         {
@@ -185,11 +205,11 @@ pub async fn replace(app: &AppHandle, old: &Settings, new: &Settings) -> Result<
         #[cfg(not(target_os = "linux"))]
         return Err("Автоматическая настройка GNOME поддерживается только на Linux.".into());
     }
-    let old_pair: Vec<_> = [&old.shortcut, &old.tts_shortcut]
+    let old_shortcuts: Vec<_> = [&old.shortcut, &old.tts_shortcut, &old.polish_shortcut]
         .into_iter()
         .filter_map(|value| validate(value).ok())
         .collect();
-    replace_native(&NativeRegistrations(app), &old_pair, &new_pair)
+    replace_native(&NativeRegistrations(app), &old_shortcuts, &new_shortcuts)
 }
 
 #[cfg(test)]
@@ -235,23 +255,38 @@ mod tests {
         [validate(a).unwrap(), validate(b).unwrap()]
     }
 
+    fn shortcuts(a: &str, b: &str, c: &str) -> [Shortcut; 3] {
+        [
+            validate(a).unwrap(),
+            validate(b).unwrap(),
+            validate(c).unwrap(),
+        ]
+    }
+
     #[test]
-    fn initial_pair_failure_rolls_back_only_acquired_shortcuts() {
-        let new = pair("Control+Super+A", "Control+Super+B");
+    fn initial_registration_failure_rolls_back_only_acquired_shortcuts() {
+        let new = shortcuts("Control+Super+A", "Control+Super+B", "Control+Super+C");
         let manager = FakeRegistrations::default();
-        manager.failures.borrow_mut().push((true, new[1]));
+        manager.failures.borrow_mut().push((true, new[2]));
         assert!(replace_native(&manager, &[], &new).is_err());
         assert!(manager.held.borrow().is_empty());
         assert_eq!(
             *manager.calls.borrow(),
-            vec![(true, new[0]), (true, new[1]), (false, new[0])]
+            vec![
+                (true, new[0]),
+                (true, new[1]),
+                (true, new[2]),
+                (false, new[1]),
+                (false, new[0]),
+            ]
         );
-        manager.held.borrow_mut().insert(new[0]);
+        manager.held.borrow_mut().extend([new[0], new[1]]);
         manager.calls.borrow_mut().clear();
-        manager.failures.borrow_mut().push((true, new[1]));
+        manager.failures.borrow_mut().push((true, new[2]));
         assert!(replace_native(&manager, &[], &new).is_err());
         assert!(manager.contains(new[0]));
-        assert_eq!(*manager.calls.borrow(), vec![(true, new[1])]);
+        assert!(manager.contains(new[1]));
+        assert_eq!(*manager.calls.borrow(), vec![(true, new[2])]);
     }
 
     #[test]
@@ -334,14 +369,15 @@ mod tests {
 
     #[test]
     fn settings_save_retains_held_edges_for_unchanged_and_swapped_shortcuts() {
-        let old = pair("Control+Super+R", "Control+Super+A");
+        let old = shortcuts("Control+Super+R", "Control+Super+A", "Control+Super+P");
         let mut pressed = HashSet::from(old);
-        retain_pressed(&mut pressed, &[old[1], old[0]]);
-        assert_eq!(pressed.len(), 2);
-        let new = pair("Control+Super+R", "Control+Super+B");
+        retain_pressed(&mut pressed, &[old[2], old[1], old[0]]);
+        assert_eq!(pressed.len(), 3);
+        let new = shortcuts("Control+Super+R", "Control+Super+B", "Control+Super+P");
         retain_pressed(&mut pressed, &new);
-        assert_eq!(pressed, HashSet::from([old[0]]));
+        assert_eq!(pressed, HashSet::from([old[0], old[2]]));
         assert!(!pressed.insert(old[0]));
+        assert!(!pressed.insert(old[2]));
         assert!(pressed.insert(new[1]));
     }
 
@@ -350,11 +386,17 @@ mod tests {
         assert!(validate("Control+Super+A").is_ok());
         let mut settings = Settings::default();
         settings.shortcut = "Super+Control+A".into();
-        assert!(validate_pair(&settings).is_err());
+        assert!(validate_all(&settings).is_err());
+        settings.shortcut = Settings::default().shortcut;
+        settings.polish_shortcut = settings.shortcut.clone();
+        assert!(validate_all(&settings).is_err());
+        settings.polish_shortcut = settings.tts_shortcut.clone();
+        assert!(validate_all(&settings).is_err());
     }
     #[test]
     fn wayland_commands_use_distinct_actions() {
         assert!(wayland_command().ends_with(" --toggle"));
         assert!(wayland_tts_command().ends_with(" --toggle-tts"));
+        assert!(wayland_polish_command().ends_with(" --cycle-polish"));
     }
 }
