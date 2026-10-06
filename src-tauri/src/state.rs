@@ -504,6 +504,7 @@ mod tests {
                 name: "Test".into(),
                 instruction: "Preserve all details.".into(),
             }],
+            favorite_profile_ids: Vec::new(),
         }
     }
 
