@@ -51,12 +51,13 @@ export default function App() {
     shortcut: '',
     model: DEFAULT_MODEL,
     tts_shortcut: '',
+    polish_shortcut: 'Control+Super+Backslash',
     tts_model: DEFAULT_TTS_MODEL,
     tts_voice: DEFAULT_TTS_VOICE,
     input_device: null,
     auto_paste: false,
     paste_shortcut: 'ctrl_v',
-    polish: { profile_id: null, model: 'gpt-6-luna', effort: null, custom_profiles: [] },
+    polish: { profile_id: null, model: 'gpt-6-luna', effort: null, custom_profiles: [], favorite_profile_ids: [] },
   });
   const [manualModel, setManualModel] = useState(false);
   const [manualTtsModel, setManualTtsModel] = useState(false);
@@ -69,13 +70,21 @@ export default function App() {
   const [confirmReset, setConfirmReset] = useState(false);
 
   const dirtyDraft = useRef(false);
+  const profileEdited = useRef(false);
   const previousSettings = useRef<Settings | null>(null);
   const savedSettings = snapshot?.settings;
   useEffect(() => {
     if (!savedSettings) return;
     const previous = previousSettings.current;
     previousSettings.current = savedSettings;
-    if (dirtyDraft.current || (previous && settingsEqual(previous, savedSettings))) return;
+    if (previous && settingsEqual(previous, savedSettings)) return;
+    if (dirtyDraft.current) {
+      if (previous && previous.polish.profile_id !== savedSettings.polish.profile_id && !profileEdited.current) {
+        setDraft((current) => ({ ...current, polish: { ...current.polish, profile_id: savedSettings.polish.profile_id } }));
+      }
+      return;
+    }
+    profileEdited.current = false;
     setDraft(savedSettings);
     setManualModel(!MODELS.some((model) => model.value === savedSettings.model));
     setManualTtsModel(!TTS_MODELS.some((model) => model.value === savedSettings.tts_model));
@@ -120,6 +129,7 @@ export default function App() {
     if (await runAction('save_settings', async () => {
       const saved = await backend.saveSettings(next);
       dirtyDraft.current = false;
+      profileEdited.current = false;
       setDraft(saved.settings);
       return saved;
     })) {
@@ -143,6 +153,9 @@ export default function App() {
   }
 
   function updateDraft<K extends keyof Settings>(key: K, value: Settings[K]) {
+    if (key === 'polish' && (value as Settings['polish']).profile_id !== draft.polish.profile_id) {
+      profileEdited.current = true;
+    }
     const next = { ...draft, [key]: value };
     dirtyDraft.current = !snapshot || !settingsEqual(normalizeSettings(next), snapshot.settings);
     setDraft(next);
@@ -436,6 +449,15 @@ export default function App() {
                     приложение не определяет цель и не пробует второе сочетание после первого.</p>
                 </div>
               )}
+              <div className="field">
+                <label htmlFor="polish-shortcut">Сочетание клавиш переключения обработки</label>
+                <input id="polish-shortcut" value={draft.polish_shortcut} maxLength={128} spellCheck={false}
+                  placeholder="Control+Super+Backslash" autoComplete="off" aria-describedby="polish-shortcut-help"
+                  aria-invalid={Boolean(settingsError)}
+                  onChange={(event) => updateDraft('polish_shortcut', event.target.value)} />
+                <p className="help" id="polish-shortcut-help">Например, <kbd>{formatShortcutHint('Control+Super+Backslash', mac).replace('Backslash', '\\')}</kbd>.
+                  Переключает «Выключено» и избранные профили в порядке списка.</p>
+              </div>
               <PolishSettingsFields key={`${keyGeneration}:${snapshot?.has_api_key}:${connected}`}
                 value={draft.polish} builtins={snapshot?.builtin_polish_profiles ?? []}
                 hasApiKey={snapshot?.has_api_key ?? false}
@@ -495,11 +517,13 @@ export default function App() {
       </div>
 
       {snapshot && (systemHotkey || !snapshot.hotkey_available || snapshot.hotkey_message
-        || !snapshot.tts_hotkey_available || snapshot.tts_hotkey_message) && (
+        || !snapshot.tts_hotkey_available || snapshot.tts_hotkey_message
+        || !snapshot.polish_hotkey_available || snapshot.polish_hotkey_message) && (
         <aside className="card hotkey-card" aria-labelledby="hotkey-heading">
           <h2 id="hotkey-heading">Системное сочетание клавиш</h2>
           {snapshot.hotkey_message && <p className="hotkey-message"><strong>Диктовка:</strong> {snapshot.hotkey_message}</p>}
           {snapshot.tts_hotkey_message && <p className="hotkey-message"><strong>Озвучивание:</strong> {snapshot.tts_hotkey_message}</p>}
+          {snapshot.polish_hotkey_message && <p className="hotkey-message"><strong>Переключение обработки:</strong> {snapshot.polish_hotkey_message}</p>}
           {systemHotkey && <>
             <p>На Ubuntu GNOME/Wayland нажмите «Сохранить настройки», чтобы применить выбранное
               сочетание к системе. Команда для этой сборки:</p>
@@ -515,6 +539,11 @@ export default function App() {
               <p>Назначьте сочетание <kbd>{formatShortcutHint(snapshot.settings.tts_shortcut, mac)}</kbd> вручную на команду:</p>
               <code className="command">{snapshot.tts_hotkey_command ?? 'stt-simple --toggle-tts'}</code>
               <p className="help">Автоматическая регистрация GNOME относится только к диктовке. TTS на Linux не проверен.</p>
+            </div>
+            <div className="wayland-tts">
+              <h3>Переключение обработки на Wayland</h3>
+              <p>Назначьте сочетание <kbd>{formatShortcutHint(snapshot.settings.polish_shortcut, mac)}</kbd> вручную на команду:</p>
+              <code className="command">{snapshot.polish_hotkey_command ?? 'stt-simple --cycle-polish'}</code>
             </div>
           </>}
           {linux && <p className="help">Для работы в фоне сверните окно. В Linux закрытие окна тоже сворачивает его,

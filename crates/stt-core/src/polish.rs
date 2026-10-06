@@ -20,6 +20,7 @@ pub struct PolishSettings {
     /// None omits reasoning configuration (provider default). Supported efforts vary by model.
     pub effort: Option<String>,
     pub custom_profiles: Vec<PolishProfile>,
+    pub favorite_profile_ids: Vec<String>,
 }
 
 impl Default for PolishSettings {
@@ -29,6 +30,7 @@ impl Default for PolishSettings {
             model: "gpt-6-luna".into(),
             effort: None,
             custom_profiles: Vec::new(),
+            favorite_profile_ids: Vec::new(),
         }
     }
 }
@@ -89,7 +91,38 @@ impl PolishSettings {
         {
             return Err("Выбранный профиль обработки не найден.".into());
         }
+        let mut favorites = HashSet::new();
+        for id in &self.favorite_profile_ids {
+            if !ids.contains(id.as_str()) {
+                return Err("Избранный профиль обработки не найден.".into());
+            }
+            if !favorites.insert(id.as_str()) {
+                return Err("Избранные профили обработки не должны повторяться.".into());
+            }
+        }
         Ok(())
+    }
+
+    pub fn cycle_profile(&mut self) -> Option<String> {
+        let favorites: HashSet<&str> = self
+            .favorite_profile_ids
+            .iter()
+            .map(String::as_str)
+            .collect();
+        let candidates: Vec<String> = builtin_polish_profiles()
+            .into_iter()
+            .chain(self.custom_profiles.iter().cloned())
+            .filter(|profile| favorites.contains(profile.id.as_str()))
+            .map(|profile| profile.id)
+            .collect();
+        self.profile_id = match self.profile_id.as_ref() {
+            None => candidates.first().cloned(),
+            Some(current) => candidates
+                .iter()
+                .position(|candidate| candidate == current)
+                .and_then(|index| candidates.get(index + 1).cloned()),
+        };
+        self.profile_id.clone()
     }
 
     pub fn selected_profile(&self) -> Result<Option<PolishProfile>, String> {
@@ -115,6 +148,13 @@ mod tests {
         }
     }
 
+    fn custom_with_id(id: &str) -> PolishProfile {
+        PolishProfile {
+            id: id.into(),
+            ..custom()
+        }
+    }
+
     #[test]
     fn migration_and_partial_defaults() {
         for json in [r#"{}"#, r#"{"polish":{}}"#] {
@@ -128,7 +168,79 @@ mod tests {
         assert_eq!(saved.model, "gpt-5-mini");
         assert!(saved.validate().is_ok());
         assert_eq!(settings.effort, None);
+        assert!(settings.favorite_profile_ids.is_empty());
         assert!(settings.validate().is_ok());
+    }
+
+    #[test]
+    fn favorites_must_be_unique_and_resolve_to_existing_profiles() {
+        let settings = PolishSettings {
+            favorite_profile_ids: vec!["polish".into(), "custom-1".into()],
+            custom_profiles: vec![custom()],
+            ..Default::default()
+        };
+        assert!(settings.validate().is_ok());
+
+        for favorite_profile_ids in [
+            vec!["polish".into(), "polish".into()],
+            vec!["missing".into()],
+        ] {
+            assert!(PolishSettings {
+                favorite_profile_ids,
+                custom_profiles: vec![custom()],
+                ..Default::default()
+            }
+            .validate()
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn cycle_uses_builtin_then_custom_order_not_favorite_selection_order() {
+        let mut settings = PolishSettings {
+            favorite_profile_ids: vec![
+                "custom-2".into(),
+                "developer".into(),
+                "custom-1".into(),
+                "polish".into(),
+            ],
+            custom_profiles: vec![custom_with_id("custom-1"), custom_with_id("custom-2")],
+            ..Default::default()
+        };
+
+        for expected in [
+            Some("polish"),
+            Some("developer"),
+            Some("custom-1"),
+            Some("custom-2"),
+            None,
+        ] {
+            assert_eq!(settings.cycle_profile().as_deref(), expected);
+            assert_eq!(settings.profile_id.as_deref(), expected);
+        }
+    }
+
+    #[test]
+    fn cycle_handles_single_empty_and_non_favorite_current_selection() {
+        let mut single = PolishSettings {
+            favorite_profile_ids: vec!["markdown".into()],
+            ..Default::default()
+        };
+        assert_eq!(single.cycle_profile().as_deref(), Some("markdown"));
+        assert_eq!(single.cycle_profile(), None);
+        assert_eq!(single.profile_id, None);
+
+        let mut empty = PolishSettings::default();
+        assert_eq!(empty.cycle_profile(), None);
+        assert_eq!(empty.profile_id, None);
+
+        let mut non_favorite = PolishSettings {
+            profile_id: Some("developer".into()),
+            favorite_profile_ids: vec!["polish".into(), "markdown".into()],
+            ..Default::default()
+        };
+        assert_eq!(non_favorite.cycle_profile(), None);
+        assert_eq!(non_favorite.profile_id, None);
     }
 
     #[test]

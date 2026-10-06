@@ -90,6 +90,11 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 .field-heading .text-button { padding-top: 0; }
 .checkbox-label { display: flex !important; align-items: center; gap: 10px; cursor: pointer; }
 .checkbox-label input { appearance: auto; flex: 0 0 auto; width: 18px; height: 18px; min-height: 0; margin: 0; padding: 0; border: 0; background: transparent; accent-color: var(--accent); }
+.favorite-profiles { min-width: 0; }
+.favorite-profiles legend { margin-bottom: 9px; font-size: 0.83rem; font-weight: 550; }
+.favorite-profile-list { display: grid; gap: 7px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: #12181e; }
+.favorite-profile-list .checkbox-label { margin: 0; font-size: 0.82rem; font-weight: 400; }
+.favorite-profile-list .checkbox-label span[aria-hidden="true"] { color: #e8bd65; font-size: 1rem; }
 input, select { display: block; width: 100%; min-height: 44px; padding: 11px 12px; border: 1px solid #3b4654; border-radius: 8px; background: #12181e; color: #e4eaf0; font-size: 0.85rem; }
 input::placeholder { color: #8c9ba9; }
 input[aria-invalid="true"] { border-color: #dc8b96; }

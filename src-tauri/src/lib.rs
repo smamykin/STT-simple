@@ -42,6 +42,7 @@ enum StartupAction {
     Show,
     ToggleStt,
     ToggleTts,
+    CyclePolish,
 }
 
 fn startup_action(args: impl IntoIterator<Item = impl AsRef<str>>) -> StartupAction {
@@ -51,6 +52,8 @@ fn startup_action(args: impl IntoIterator<Item = impl AsRef<str>>) -> StartupAct
         .collect();
     if args.iter().any(|arg| arg == "--toggle-tts") {
         StartupAction::ToggleTts
+    } else if args.iter().any(|arg| arg == "--cycle-polish") {
+        StartupAction::CyclePolish
     } else if args.iter().any(|arg| arg == "--toggle") {
         StartupAction::ToggleStt
     } else {
@@ -123,10 +126,11 @@ where
 async fn save_settings(app: AppHandle, mut settings: Settings) -> Result<Snapshot, String> {
     settings.shortcut = settings.shortcut.trim().to_owned();
     settings.tts_shortcut = settings.tts_shortcut.trim().to_owned();
+    settings.polish_shortcut = settings.polish_shortcut.trim().to_owned();
     settings.tts_model = settings.tts_model.trim().to_owned();
     settings.tts_voice = settings.tts_voice.trim().to_owned();
     settings.validate()?;
-    let new_pair = shortcuts::validate_pair(&settings)?;
+    let new_shortcuts = shortcuts::validate_all(&settings)?;
     let runtime = app.state::<Runtime>();
     let _guard = runtime
         .control
@@ -179,10 +183,52 @@ async fn save_settings(app: AppHandle, mut settings: Settings) -> Result<Snapsho
             .shortcut_pressed
             .lock()
             .expect("shortcut state poisoned"),
-        &new_pair,
+        &new_shortcuts,
     );
     tray::publish(&app);
     Ok(runtime.snapshot())
+}
+
+async fn cycle_polish_profile_runtime(runtime: &Runtime) -> Result<Snapshot, String> {
+    let _guard = runtime
+        .control
+        .try_lock()
+        .map_err(|_| "Дождитесь завершения предыдущего действия.".to_owned())?;
+    let mut candidate = {
+        let data = runtime.data.lock().expect("application state poisoned");
+        data.ensure_idle()?;
+        data.stored.clone()
+    };
+    candidate.settings.polish.cycle_profile();
+    let saved = candidate.clone();
+    let path = runtime.storage_path.clone();
+    let outcome = match blocking(move || save_data(&path, &saved)).await {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            let error = format!("Не удалось сохранить переключение профиля обработки: {error}");
+            runtime
+                .data
+                .lock()
+                .expect("application state poisoned")
+                .last_error = Some(error.clone());
+            return Err(error);
+        }
+    };
+    {
+        let mut data = runtime.data.lock().expect("application state poisoned");
+        data.stored = candidate;
+        data.update_warning(outcome.durability_warning);
+    }
+    Ok(runtime.snapshot())
+}
+
+#[tauri::command]
+async fn cycle_polish_profile(app: AppHandle) -> Result<Snapshot, String> {
+    let result = cycle_polish_profile_runtime(&app.state::<Runtime>()).await;
+    // Publish persistence errors for native hotkeys and single-instance CLI dispatch too.
+    // Busy/control-lock rejections leave state unchanged and remain quiet.
+    tray::publish(&app);
+    result
 }
 
 #[tauri::command]
@@ -991,10 +1037,31 @@ fn monitor_microphone(app: AppHandle) {
     });
 }
 
+fn shortcut_action(
+    settings: &Settings,
+    shortcut: &tauri_plugin_global_shortcut::Shortcut,
+) -> Option<StartupAction> {
+    if shortcuts::validate(&settings.shortcut).ok().as_ref() == Some(shortcut) {
+        Some(StartupAction::ToggleStt)
+    } else if shortcuts::validate(&settings.tts_shortcut).ok().as_ref() == Some(shortcut) {
+        Some(StartupAction::ToggleTts)
+    } else if shortcuts::validate(&settings.polish_shortcut).ok().as_ref() == Some(shortcut) {
+        Some(StartupAction::CyclePolish)
+    } else {
+        None
+    }
+}
+
 fn dispatch_request(app: &AppHandle, action: StartupAction) {
     match action {
         StartupAction::ToggleStt => spawn_shortcut_toggle(app.clone()),
         StartupAction::ToggleTts => spawn_speech(app.clone()),
+        StartupAction::CyclePolish => {
+            let handle = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let _ = cycle_polish_profile(handle).await;
+            });
+        }
         StartupAction::Show => {
             let handle = app.clone();
             let _ = app.run_on_main_thread(move || tray::show_window(&handle));
@@ -1027,15 +1094,7 @@ pub fn run() {
                         None => return,
                     };
                     let settings = runtime.snapshot().settings;
-                    let action = if shortcuts::validate(&settings.shortcut).ok().as_ref()
-                        == Some(shortcut)
-                    {
-                        StartupAction::ToggleStt
-                    } else if shortcuts::validate(&settings.tts_shortcut).ok().as_ref()
-                        == Some(shortcut)
-                    {
-                        StartupAction::ToggleTts
-                    } else {
+                    let Some(action) = shortcut_action(&settings, shortcut) else {
                         return;
                     };
                     let mut pressed = runtime
@@ -1074,7 +1133,9 @@ pub fn run() {
             let client = OpenAiClient::new().map_err(std::io::Error::other)?;
             app.manage(Runtime {
                 data: Mutex::new(Data { tts_session: None, next_tts_session_id: 0,
-                    tts_hotkey_available: false, tts_hotkey_command: None, tts_hotkey_message: None, stored, phase: Phase::Idle, session: None, next_session_id: 0,
+                    tts_hotkey_available: false, tts_hotkey_command: None, tts_hotkey_message: None,
+                    polish_hotkey_available: false, polish_hotkey_command: if wayland { Some(shortcuts::wayland_polish_command()) } else { None }, polish_hotkey_message: None,
+                    stored, phase: Phase::Idle, session: None, next_session_id: 0,
                     last_transcript: None, last_raw_transcript: None, pending_polish: None, last_error, has_api_key,
                     hotkey_available: false, hotkey_message: None,
                     hotkey_mode: if wayland { HotkeyMode::System } else { HotkeyMode::Native },
@@ -1114,7 +1175,7 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![get_snapshot, list_input_devices, list_openai_models,
-            save_settings, set_api_key, delete_api_key, reset_statistics,
+            save_settings, cycle_polish_profile, set_api_key, delete_api_key, reset_statistics,
             toggle_recording, toggle_speech, cancel_recording, copy_last_transcript, retry_polish, quit_app])
         .run(tauri::generate_context!())
         .expect("failed to run STT Simple");
@@ -1132,6 +1193,9 @@ mod tests {
                 tts_hotkey_available: false,
                 tts_hotkey_command: None,
                 tts_hotkey_message: None,
+                polish_hotkey_available: false,
+                polish_hotkey_command: None,
+                polish_hotkey_message: None,
                 stored: StoredData::default(),
                 phase,
                 session: None,
@@ -1152,6 +1216,185 @@ mod tests {
             client: OpenAiClient::new().unwrap(),
             storage_path: Default::default(),
         }
+    }
+
+    fn cycle_runtime(phase: Phase, storage_path: std::path::PathBuf) -> Runtime {
+        let mut runtime = models_runtime(phase);
+        runtime.storage_path = storage_path;
+        runtime
+    }
+
+    fn test_storage_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "stt-simple-{name}-{}-settings.json",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn cycle_polish_profile_persists_before_committing_and_cycles_to_off() {
+        tauri::async_runtime::block_on(async {
+            let path = test_storage_path("cycle-profile");
+            let _ = std::fs::remove_file(&path);
+            let runtime = cycle_runtime(Phase::Idle, path.clone());
+            {
+                let mut data = runtime.data.lock().unwrap();
+                data.stored.settings.polish.favorite_profile_ids =
+                    vec!["polish".into(), "markdown".into()];
+            }
+
+            let snapshot = cycle_polish_profile_runtime(&runtime).await.unwrap();
+            assert_eq!(
+                snapshot.settings.polish.profile_id.as_deref(),
+                Some("polish")
+            );
+            assert_eq!(
+                load_data(&path)
+                    .unwrap()
+                    .settings
+                    .polish
+                    .profile_id
+                    .as_deref(),
+                Some("polish")
+            );
+
+            runtime
+                .data
+                .lock()
+                .unwrap()
+                .stored
+                .settings
+                .polish
+                .profile_id = Some("markdown".into());
+            let snapshot = cycle_polish_profile_runtime(&runtime).await.unwrap();
+            assert_eq!(snapshot.settings.polish.profile_id, None);
+            assert_eq!(load_data(&path).unwrap().settings.polish.profile_id, None);
+            let _ = std::fs::remove_file(path);
+        });
+    }
+
+    #[test]
+    fn cycle_polish_profile_with_no_favorites_returns_off() {
+        tauri::async_runtime::block_on(async {
+            let path = test_storage_path("cycle-empty");
+            let _ = std::fs::remove_file(&path);
+            let runtime = cycle_runtime(Phase::Idle, path.clone());
+            let snapshot = cycle_polish_profile_runtime(&runtime).await.unwrap();
+            assert_eq!(snapshot.settings.polish.profile_id, None);
+            assert_eq!(load_data(&path).unwrap().settings.polish.profile_id, None);
+            let _ = std::fs::remove_file(path);
+        });
+    }
+
+    #[test]
+    fn cycle_polish_profile_rejects_held_control_without_changing_disk_or_memory() {
+        tauri::async_runtime::block_on(async {
+            let path = test_storage_path("cycle-control-held");
+            let _ = std::fs::remove_file(&path);
+            let runtime = cycle_runtime(Phase::Idle, path.clone());
+            runtime
+                .data
+                .lock()
+                .unwrap()
+                .stored
+                .settings
+                .polish
+                .favorite_profile_ids = vec!["polish".into()];
+            let guard = runtime.control.lock().await;
+
+            assert!(cycle_polish_profile_runtime(&runtime).await.is_err());
+            assert_eq!(
+                runtime.snapshot().last_error.as_deref(),
+                Some("previous error")
+            );
+            assert_eq!(
+                runtime
+                    .data
+                    .lock()
+                    .unwrap()
+                    .stored
+                    .settings
+                    .polish
+                    .profile_id,
+                None
+            );
+            assert!(!path.exists());
+            drop(guard);
+        });
+    }
+
+    #[test]
+    fn cycle_polish_profile_rejects_busy_phases_without_changing_disk_or_memory() {
+        tauri::async_runtime::block_on(async {
+            for phase in [
+                Phase::Recording,
+                Phase::Transcribing,
+                Phase::Polishing,
+                Phase::Synthesizing,
+                Phase::Playing,
+            ] {
+                let path = test_storage_path(&format!("cycle-busy-{}", phase as u8));
+                let _ = std::fs::remove_file(&path);
+                let runtime = cycle_runtime(phase, path.clone());
+                runtime
+                    .data
+                    .lock()
+                    .unwrap()
+                    .stored
+                    .settings
+                    .polish
+                    .favorite_profile_ids = vec!["polish".into()];
+                assert!(cycle_polish_profile_runtime(&runtime).await.is_err());
+                assert_eq!(
+                    runtime.snapshot().last_error.as_deref(),
+                    Some("previous error")
+                );
+                assert_eq!(
+                    runtime
+                        .data
+                        .lock()
+                        .unwrap()
+                        .stored
+                        .settings
+                        .polish
+                        .profile_id,
+                    None
+                );
+                assert!(!path.exists());
+            }
+        });
+    }
+
+    #[test]
+    fn cycle_polish_profile_preserves_memory_after_persistence_failure() {
+        tauri::async_runtime::block_on(async {
+            let parent = test_storage_path("cycle-failure-parent");
+            let _ = std::fs::remove_file(&parent);
+            std::fs::write(&parent, b"not a directory").unwrap();
+            let runtime = cycle_runtime(Phase::Idle, parent.join("settings.json"));
+            runtime
+                .data
+                .lock()
+                .unwrap()
+                .stored
+                .settings
+                .polish
+                .favorite_profile_ids = vec!["polish".into()];
+
+            let before = std::fs::read(&parent).unwrap();
+            let error = cycle_polish_profile_runtime(&runtime).await.err().unwrap();
+            assert!(error.contains("Не удалось сохранить переключение профиля обработки"));
+            assert!(error.contains("Не удалось создать каталог настроек"));
+            let snapshot = runtime.snapshot();
+            assert_eq!(snapshot.last_error.as_deref(), Some(error.as_str()));
+            assert_eq!(snapshot.settings.polish.profile_id, None);
+            assert_eq!(
+                snapshot.settings.polish.favorite_profile_ids,
+                vec!["polish"]
+            );
+            assert_eq!(std::fs::read(&parent).unwrap(), before);
+            let _ = std::fs::remove_file(parent);
+        });
     }
 
     #[test]
@@ -1398,6 +1641,33 @@ mod tests {
     }
 
     #[test]
+    fn native_shortcuts_dispatch_all_three_actions() {
+        let settings = Settings::default();
+        assert_eq!(
+            shortcut_action(&settings, &shortcuts::validate(&settings.shortcut).unwrap()),
+            Some(StartupAction::ToggleStt)
+        );
+        assert_eq!(
+            shortcut_action(
+                &settings,
+                &shortcuts::validate(&settings.tts_shortcut).unwrap()
+            ),
+            Some(StartupAction::ToggleTts)
+        );
+        assert_eq!(
+            shortcut_action(
+                &settings,
+                &shortcuts::validate(&settings.polish_shortcut).unwrap()
+            ),
+            Some(StartupAction::CyclePolish)
+        );
+        assert_eq!(
+            shortcut_action(&settings, &shortcuts::validate("Control+Alt+9").unwrap()),
+            None
+        );
+    }
+
+    #[test]
     fn shortcut_edges_are_independent() {
         let mut pressed = HashSet::new();
         let stt = shortcuts::validate("Control+Super+R").unwrap();
@@ -1421,6 +1691,10 @@ mod tests {
         assert_eq!(
             startup_action(["app", "--toggle-tts"]),
             StartupAction::ToggleTts
+        );
+        assert_eq!(
+            startup_action(["app", "--cycle-polish"]),
+            StartupAction::CyclePolish
         );
         assert_eq!(
             startup_action(["--toggle", "--toggle-tts"]),
