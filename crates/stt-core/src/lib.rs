@@ -35,6 +35,7 @@ pub struct Settings {
     pub shortcut: String,
     pub model: String,
     pub tts_shortcut: String,
+    pub polish_shortcut: String,
     pub tts_model: String,
     pub tts_voice: String,
     pub input_device: Option<String>,
@@ -54,6 +55,7 @@ impl Default for Settings {
             .to_owned(),
             model: DEFAULT_MODEL.to_owned(),
             tts_shortcut: "Control+Super+A".to_owned(),
+            polish_shortcut: "Control+Super+Backslash".to_owned(),
             tts_model: DEFAULT_TTS_MODEL.to_owned(),
             tts_voice: DEFAULT_TTS_VOICE.to_owned(),
             input_device: None,
@@ -78,6 +80,10 @@ impl Settings {
         validate_shortcut(
             &self.tts_shortcut,
             "Укажите сочетание клавиш озвучивания длиной от 1 до 128 символов.",
+        )?;
+        validate_shortcut(
+            &self.polish_shortcut,
+            "Укажите сочетание клавиш обработки длиной от 1 до 128 символов.",
         )?;
         if shortcuts_are_equivalent(&self.shortcut, &self.tts_shortcut) {
             return Err("Сочетания клавиш распознавания и озвучивания не должны совпадать.".into());
@@ -263,6 +269,7 @@ mod tests {
         assert_eq!(DEFAULT_TTS_VOICE, "marin");
         assert_eq!(MAX_TTS_INPUT_CHARS, 4096);
         assert_eq!(settings.tts_shortcut, "Control+Super+A");
+        assert_eq!(settings.polish_shortcut, "Control+Super+Backslash");
         assert_eq!(settings.tts_model, DEFAULT_TTS_MODEL);
         assert_eq!(settings.tts_voice, DEFAULT_TTS_VOICE);
         assert_eq!(settings.input_device, None);
@@ -358,8 +365,10 @@ mod tests {
         let settings: Settings =
             serde_json::from_str(r#"{"shortcut":"Super+R","model":"whisper-1"}"#).unwrap();
         assert_eq!(settings.tts_shortcut, "Control+Super+A");
+        assert_eq!(settings.polish_shortcut, "Control+Super+Backslash");
         assert_eq!(settings.tts_model, DEFAULT_TTS_MODEL);
         assert_eq!(settings.tts_voice, DEFAULT_TTS_VOICE);
+        assert!(settings.polish.favorite_profile_ids.is_empty());
     }
 
     #[test]

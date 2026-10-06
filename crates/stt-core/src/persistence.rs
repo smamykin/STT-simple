@@ -183,6 +183,8 @@ mod tests {
         .unwrap();
         let mut data = load_data(&path).unwrap();
         assert_eq!(data.settings.polish, crate::PolishSettings::default());
+        assert!(data.settings.polish.favorite_profile_ids.is_empty());
+        assert_eq!(data.settings.polish_shortcut, "Control+Super+Backslash");
         assert_eq!(data.settings.model, "whisper-1");
         assert!(data.settings.auto_paste);
         data.settings.polish = crate::PolishSettings {
@@ -194,6 +196,7 @@ mod tests {
                 name: "Личный профиль".into(),
                 instruction: "Исправь пунктуацию.".into(),
             }],
+            favorite_profile_ids: vec!["my-profile".into()],
         };
         save_data(&path, &data).unwrap();
         assert_eq!(load_data(&path).unwrap().settings, data.settings);
