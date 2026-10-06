@@ -1274,6 +1274,39 @@ mod tests {
     }
 
     #[test]
+    fn cycle_polish_profile_rejects_held_control_without_changing_disk_or_memory() {
+        tauri::async_runtime::block_on(async {
+            let path = test_storage_path("cycle-control-held");
+            let _ = std::fs::remove_file(&path);
+            let runtime = cycle_runtime(Phase::Idle, path.clone());
+            runtime
+                .data
+                .lock()
+                .unwrap()
+                .stored
+                .settings
+                .polish
+                .favorite_profile_ids = vec!["polish".into()];
+            let guard = runtime.control.lock().await;
+
+            assert!(cycle_polish_profile_runtime(&runtime).await.is_err());
+            assert_eq!(
+                runtime
+                    .data
+                    .lock()
+                    .unwrap()
+                    .stored
+                    .settings
+                    .polish
+                    .profile_id,
+                None
+            );
+            assert!(!path.exists());
+            drop(guard);
+        });
+    }
+
+    #[test]
     fn cycle_polish_profile_rejects_busy_phases_without_changing_disk_or_memory() {
         tauri::async_runtime::block_on(async {
             for phase in [
