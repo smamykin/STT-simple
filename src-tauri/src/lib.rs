@@ -202,7 +202,18 @@ async fn cycle_polish_profile_runtime(runtime: &Runtime) -> Result<Snapshot, Str
     candidate.settings.polish.cycle_profile();
     let saved = candidate.clone();
     let path = runtime.storage_path.clone();
-    let outcome = blocking(move || save_data(&path, &saved)).await?;
+    let outcome = match blocking(move || save_data(&path, &saved)).await {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            let error = format!("Не удалось сохранить переключение профиля обработки: {error}");
+            runtime
+                .data
+                .lock()
+                .expect("application state poisoned")
+                .last_error = Some(error.clone());
+            return Err(error);
+        }
+    };
     {
         let mut data = runtime.data.lock().expect("application state poisoned");
         data.stored = candidate;
@@ -213,9 +224,11 @@ async fn cycle_polish_profile_runtime(runtime: &Runtime) -> Result<Snapshot, Str
 
 #[tauri::command]
 async fn cycle_polish_profile(app: AppHandle) -> Result<Snapshot, String> {
-    let snapshot = cycle_polish_profile_runtime(&app.state::<Runtime>()).await?;
+    let result = cycle_polish_profile_runtime(&app.state::<Runtime>()).await;
+    // Publish persistence errors for native hotkeys and single-instance CLI dispatch too.
+    // Busy/control-lock rejections leave state unchanged and remain quiet.
     tray::publish(&app);
-    Ok(snapshot)
+    result
 }
 
 #[tauri::command]
@@ -1291,6 +1304,10 @@ mod tests {
 
             assert!(cycle_polish_profile_runtime(&runtime).await.is_err());
             assert_eq!(
+                runtime.snapshot().last_error.as_deref(),
+                Some("previous error")
+            );
+            assert_eq!(
                 runtime
                     .data
                     .lock()
@@ -1329,6 +1346,10 @@ mod tests {
                     .favorite_profile_ids = vec!["polish".into()];
                 assert!(cycle_polish_profile_runtime(&runtime).await.is_err());
                 assert_eq!(
+                    runtime.snapshot().last_error.as_deref(),
+                    Some("previous error")
+                );
+                assert_eq!(
                     runtime
                         .data
                         .lock()
@@ -1360,10 +1381,18 @@ mod tests {
                 .polish
                 .favorite_profile_ids = vec!["polish".into()];
 
-            assert!(cycle_polish_profile_runtime(&runtime).await.is_err());
-            let polish = &runtime.data.lock().unwrap().stored.settings.polish;
-            assert_eq!(polish.profile_id, None);
-            assert_eq!(polish.favorite_profile_ids, vec!["polish"]);
+            let before = std::fs::read(&parent).unwrap();
+            let error = cycle_polish_profile_runtime(&runtime).await.err().unwrap();
+            assert!(error.contains("Не удалось сохранить переключение профиля обработки"));
+            assert!(error.contains("Не удалось создать каталог настроек"));
+            let snapshot = runtime.snapshot();
+            assert_eq!(snapshot.last_error.as_deref(), Some(error.as_str()));
+            assert_eq!(snapshot.settings.polish.profile_id, None);
+            assert_eq!(
+                snapshot.settings.polish.favorite_profile_ids,
+                vec!["polish"]
+            );
+            assert_eq!(std::fs::read(&parent).unwrap(), before);
             let _ = std::fs::remove_file(parent);
         });
     }

@@ -16,16 +16,31 @@ pub fn load_data(path: &Path) -> Result<StoredData, String> {
     };
     let value: serde_json::Value = serde_json::from_slice(&bytes)
         .map_err(|_| "Файл настроек повреждён. Восстановите его из резервной копии или удалите, чтобы сбросить настройки.".to_owned())?;
-    let has_tts_shortcut = value
-        .get("settings")
-        .and_then(serde_json::Value::as_object)
-        .is_some_and(|settings| settings.contains_key("tts_shortcut"));
+    let settings = value.get("settings").and_then(serde_json::Value::as_object);
+    let has_tts_shortcut = settings.is_some_and(|settings| settings.contains_key("tts_shortcut"));
+    let has_polish_shortcut =
+        settings.is_some_and(|settings| settings.contains_key("polish_shortcut"));
     let mut data: StoredData = serde_json::from_value(value)
         .map_err(|_| "Файл настроек повреждён. Восстановите его из резервной копии или удалите, чтобы сбросить настройки.".to_owned())?;
     if !has_tts_shortcut
         && shortcuts_are_equivalent(&data.settings.shortcut, &data.settings.tts_shortcut)
     {
         data.settings.tts_shortcut = "Control+Super+4".into();
+    }
+    if !has_polish_shortcut {
+        // Only two older actions can occupy these three valid, ordered candidates.
+        data.settings.polish_shortcut = [
+            "Control+Super+Backslash",
+            "Control+Super+5",
+            "Control+Super+6",
+        ]
+        .into_iter()
+        .find(|candidate| {
+            !shortcuts_are_equivalent(candidate, &data.settings.shortcut)
+                && !shortcuts_are_equivalent(candidate, &data.settings.tts_shortcut)
+        })
+        .expect("three cycle candidates for two existing shortcuts")
+        .into();
     }
     validate_data(&data)?;
     Ok(data)
@@ -299,6 +314,61 @@ mod tests {
         ] {
             fs::write(&path, json).unwrap();
             assert!(load_data(&path).is_err());
+        }
+    }
+
+    #[test]
+    fn missing_cycle_shortcut_avoids_legacy_stt_and_tts_aliases() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("settings.json");
+        for (stt, tts, expected) in [
+            ("Cmd+Ctrl+Backslash", "Control+Super+A", "Control+Super+5"),
+            ("Super+R", "Super+Control+Backslash", "Control+Super+5"),
+            ("cTrL+cMd+Backslash", "super+ctrl+5", "Control+Super+6"),
+            (
+                "super+ctrl+5",
+                "option+command+Backslash",
+                "Control+Super+Backslash",
+            ),
+        ] {
+            let json = serde_json::json!({ "settings": { "shortcut": stt, "tts_shortcut": tts } });
+            fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+            let loaded = load_data(&path).unwrap();
+            assert_eq!(loaded.settings.shortcut, stt);
+            assert_eq!(loaded.settings.tts_shortcut, tts);
+            assert_eq!(loaded.settings.polish_shortcut, expected);
+            assert!(!shortcuts_are_equivalent(expected, stt));
+            assert!(!shortcuts_are_equivalent(expected, tts));
+            save_data(&path, &loaded).unwrap();
+            assert_eq!(load_data(&path).unwrap().settings, loaded.settings);
+        }
+        let json = serde_json::json!({ "settings": { "shortcut": "cMd+cTrL+a" } });
+        fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+        let loaded = load_data(&path).unwrap();
+        assert_eq!(loaded.settings.shortcut, "cMd+cTrL+a");
+        assert_eq!(loaded.settings.tts_shortcut, "Control+Super+4");
+        assert_eq!(loaded.settings.polish_shortcut, "Control+Super+Backslash");
+    }
+
+    #[test]
+    fn explicitly_persisted_cycle_conflicts_are_not_migrated() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("settings.json");
+        for (stt, tts) in [
+            ("Control+Super+Backslash", "Control+Super+A"),
+            ("Control+Super+R", "cMd+cTrL+Backslash"),
+        ] {
+            let json = serde_json::json!({ "settings": {
+                "shortcut": stt, "tts_shortcut": tts,
+                "polish_shortcut": "Super+Control+Backslash"
+            } });
+            fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+            let loaded = load_data(&path).unwrap();
+            assert_eq!(loaded.settings.polish_shortcut, "Super+Control+Backslash");
+            assert!(
+                shortcuts_are_equivalent(&loaded.settings.polish_shortcut, stt)
+                    || shortcuts_are_equivalent(&loaded.settings.polish_shortcut, tts)
+            );
         }
     }
 

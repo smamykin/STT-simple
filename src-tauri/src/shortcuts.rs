@@ -394,6 +394,32 @@ mod tests {
         assert!(validate_all(&settings).is_err());
     }
     #[test]
+    fn explicitly_persisted_cycle_conflicts_reach_backend_validation() {
+        for candidate in [
+            "Control+Super+Backslash",
+            "Control+Super+5",
+            "Control+Super+6",
+        ] {
+            assert!(validate(candidate).is_ok());
+        }
+        for (stt, tts) in [
+            ("Control+Super+Backslash", "Control+Super+A"),
+            ("Control+Super+R", "cMd+cTrL+Backslash"),
+        ] {
+            let settings = Settings {
+                shortcut: stt.into(),
+                tts_shortcut: tts.into(),
+                polish_shortcut: "Super+Control+Backslash".into(),
+                ..Settings::default()
+            };
+            assert_eq!(settings.polish_shortcut, "Super+Control+Backslash");
+            assert!(validate_all(&settings)
+                .unwrap_err()
+                .contains("не должны совпадать"));
+        }
+    }
+
+    #[test]
     fn wayland_commands_use_distinct_actions() {
         assert!(wayland_command().ends_with(" --toggle"));
         assert!(wayland_tts_command().ends_with(" --toggle-tts"));

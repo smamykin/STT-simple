@@ -70,13 +70,21 @@ export default function App() {
   const [confirmReset, setConfirmReset] = useState(false);
 
   const dirtyDraft = useRef(false);
+  const profileEdited = useRef(false);
   const previousSettings = useRef<Settings | null>(null);
   const savedSettings = snapshot?.settings;
   useEffect(() => {
     if (!savedSettings) return;
     const previous = previousSettings.current;
     previousSettings.current = savedSettings;
-    if (dirtyDraft.current || (previous && settingsEqual(previous, savedSettings))) return;
+    if (previous && settingsEqual(previous, savedSettings)) return;
+    if (dirtyDraft.current) {
+      if (previous && previous.polish.profile_id !== savedSettings.polish.profile_id && !profileEdited.current) {
+        setDraft((current) => ({ ...current, polish: { ...current.polish, profile_id: savedSettings.polish.profile_id } }));
+      }
+      return;
+    }
+    profileEdited.current = false;
     setDraft(savedSettings);
     setManualModel(!MODELS.some((model) => model.value === savedSettings.model));
     setManualTtsModel(!TTS_MODELS.some((model) => model.value === savedSettings.tts_model));
@@ -121,6 +129,7 @@ export default function App() {
     if (await runAction('save_settings', async () => {
       const saved = await backend.saveSettings(next);
       dirtyDraft.current = false;
+      profileEdited.current = false;
       setDraft(saved.settings);
       return saved;
     })) {
@@ -144,6 +153,9 @@ export default function App() {
   }
 
   function updateDraft<K extends keyof Settings>(key: K, value: Settings[K]) {
+    if (key === 'polish' && (value as Settings['polish']).profile_id !== draft.polish.profile_id) {
+      profileEdited.current = true;
+    }
     const next = { ...draft, [key]: value };
     dirtyDraft.current = !snapshot || !settingsEqual(normalizeSettings(next), snapshot.settings);
     setDraft(next);

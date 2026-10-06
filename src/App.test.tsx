@@ -257,6 +257,38 @@ describe('polishing interface', () => {
     expect(backend.saveSettings).toHaveBeenCalledTimes(3);
   });
 
+  it('rebases an untouched profile selection after an external cycle without discarding other dirty fields', async () => {
+    const initial = makeSnapshot();
+    await mount(initial);
+    fireEvent.change(screen.getByLabelText('Сочетание клавиш'), { target: { value: 'Super+T' } });
+    const cycled = makeSnapshot();
+    cycled.settings.polish.profile_id = 'markdown';
+    emit(cycled);
+    expect(screen.getByLabelText('Профиль обработки текста')).toHaveProperty('value', 'markdown');
+    expect(screen.getByLabelText('Сочетание клавиш')).toHaveProperty('value', 'Super+T');
+    backend.saveSettings.mockImplementation(async (settings: Settings) => ({ ...cycled, settings }));
+    fireEvent.click(screen.getByRole('button', { name: 'Сохранить настройки' }));
+    await waitFor(() => expect(backend.saveSettings).toHaveBeenCalledTimes(1));
+    expect(backend.saveSettings.mock.calls[0]?.[0].polish.profile_id).toBe('markdown');
+    expect(backend.saveSettings.mock.calls[0]?.[0].shortcut).toBe('Super+T');
+  });
+
+  it('preserves an explicitly edited profile selection when an external cycle arrives', async () => {
+    const initial = makeSnapshot();
+    await mount(initial);
+    fireEvent.change(screen.getByLabelText('Профиль обработки текста'), { target: { value: 'developer' } });
+    fireEvent.change(screen.getByLabelText('Сочетание клавиш'), { target: { value: 'Super+T' } });
+    const cycled = makeSnapshot();
+    cycled.settings.polish.profile_id = 'markdown';
+    emit(cycled);
+    expect(screen.getByLabelText('Профиль обработки текста')).toHaveProperty('value', 'developer');
+    expect(screen.getByLabelText('Сочетание клавиш')).toHaveProperty('value', 'Super+T');
+    backend.saveSettings.mockImplementation(async (settings: Settings) => ({ ...cycled, settings }));
+    fireEvent.click(screen.getByRole('button', { name: 'Сохранить настройки' }));
+    await waitFor(() => expect(backend.saveSettings).toHaveBeenCalledTimes(1));
+    expect(backend.saveSettings.mock.calls[0]?.[0].polish.profile_id).toBe('developer');
+  });
+
   it('removes a deleted custom profile from favorites', async () => {
     const snapshot = makeSnapshot();
     snapshot.settings.polish = {
