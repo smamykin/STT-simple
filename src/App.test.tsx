@@ -21,6 +21,7 @@ const backend = vi.hoisted(() => ({
   resetStatistics: vi.fn(),
   copyLastTranscript: vi.fn(),
   retryPolish: vi.fn(),
+  cyclePolishProfile: vi.fn(),
   quitApp: vi.fn(),
   subscribe: vi.fn(),
 }));
@@ -176,6 +177,47 @@ describe('polishing interface', () => {
     expect(backend.saveSettings).not.toHaveBeenCalled();
   });
 
+  it('edits favorite profiles independently and explains cycle semantics', async () => {
+    const snapshot = makeSnapshot();
+    snapshot.settings.polish = {
+      ...snapshot.settings.polish,
+      custom_profiles: [{ id: 'custom-test', name: 'Мой профиль', instruction: 'Инструкция' }],
+      favorite_profile_ids: ['markdown'],
+    };
+    await mount(snapshot);
+    const polish = screen.getByLabelText('Избранный профиль: Минимальная правка');
+    const markdown = screen.getByLabelText('Избранный профиль: Markdown');
+    const developer = screen.getByLabelText('Избранный профиль: Сообщение разработчика');
+    const custom = screen.getByLabelText('Избранный профиль: Мой профиль');
+    expect(polish).toHaveProperty('checked', false);
+    expect(markdown).toHaveProperty('checked', true);
+    expect(developer).toHaveProperty('checked', false);
+    expect(custom).toHaveProperty('checked', false);
+    expect(screen.getByText(/«Выключено» всегда участвует в цикле/)).toBeTruthy();
+    expect(screen.getByText(/Один избранный профиль превращает переключение в тумблер/)).toBeTruthy();
+    fireEvent.click(polish);
+    fireEvent.click(custom);
+    fireEvent.click(markdown);
+    expect(polish).toHaveProperty('checked', true);
+    expect(markdown).toHaveProperty('checked', false);
+    expect(custom).toHaveProperty('checked', true);
+    expect(backend.saveSettings).not.toHaveBeenCalled();
+  });
+
+  it('shows the macOS cycle shortcut and locks it with favorite controls while busy', async () => {
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/605.1.15',
+    );
+    await mount();
+    expect(screen.getByLabelText('Сочетание клавиш переключения обработки')).toHaveProperty('value', 'Control+Super+Backslash');
+    expect(screen.getByText('Ctrl+Cmd+\\', { selector: 'kbd' })).toBeTruthy();
+    emit(makeSnapshot({ phase: 'recording' }));
+    expect(screen.getByLabelText('Сочетание клавиш переключения обработки').matches(':disabled')).toBe(true);
+    for (const favorite of screen.getAllByRole('checkbox', { name: /Избранный профиль:/ })) {
+      expect(favorite.matches(':disabled')).toBe(true);
+    }
+  });
+
   it('creates, edits and deletes custom profiles only through the existing settings save', async () => {
     let snapshot = makeSnapshot();
     await mount(snapshot);
@@ -211,8 +253,24 @@ describe('polishing interface', () => {
     expect(screen.getByLabelText('Профиль обработки текста')).toHaveProperty('value', '');
     expect(snapshot.settings.polish.custom_profiles).toHaveLength(1);
     await save();
-    expect(snapshot.settings.polish).toEqual({ profile_id: null, model: 'gpt-6-luna', effort: null, custom_profiles: [] });
+    expect(snapshot.settings.polish).toEqual({ profile_id: null, model: 'gpt-6-luna', effort: null, custom_profiles: [], favorite_profile_ids: [] });
     expect(backend.saveSettings).toHaveBeenCalledTimes(3);
+  });
+
+  it('removes a deleted custom profile from favorites', async () => {
+    const snapshot = makeSnapshot();
+    snapshot.settings.polish = {
+      ...snapshot.settings.polish,
+      profile_id: 'custom-test',
+      custom_profiles: [{ id: 'custom-test', name: 'Мой профиль', instruction: 'Инструкция' }],
+      favorite_profile_ids: ['polish', 'custom-test'],
+    };
+    await mount(snapshot);
+    backend.saveSettings.mockImplementation(async (settings: Settings) => ({ ...snapshot, settings }));
+    fireEvent.click(screen.getByRole('button', { name: 'Удалить профиль' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Сохранить настройки' }));
+    await waitFor(() => expect(backend.saveSettings).toHaveBeenCalled());
+    expect(backend.saveSettings.mock.calls[0]?.[0].polish.favorite_profile_ids).toEqual(['polish']);
   });
 
   it.each(['', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])('saves a custom model and effort %j without resetting the draft on state events', async (effort) => {

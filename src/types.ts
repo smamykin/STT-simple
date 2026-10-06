@@ -11,12 +11,14 @@ export interface PolishSettings {
   model: string;
   effort: string | null;
   custom_profiles: PolishProfile[];
+  favorite_profile_ids: string[];
 }
 
 export interface Settings {
   shortcut: string;
   model: string;
   tts_shortcut: string;
+  polish_shortcut: string;
   tts_model: string;
   tts_voice: string;
   input_device: string | null;
@@ -48,6 +50,9 @@ export interface Snapshot {
   tts_hotkey_available: boolean;
   tts_hotkey_command: string | null;
   tts_hotkey_message: string | null;
+  polish_hotkey_available: boolean;
+  polish_hotkey_command: string | null;
+  polish_hotkey_message: string | null;
   recording_seconds: number;
 }
 

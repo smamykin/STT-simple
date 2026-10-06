@@ -17,6 +17,7 @@ export const backend = {
   resetStatistics: () => invoke<Snapshot>('reset_statistics'),
   copyLastTranscript: () => invoke<void>('copy_last_transcript'),
   retryPolish: () => invoke<void>('retry_polish'),
+  cyclePolishProfile: () => invoke<Snapshot>('cycle_polish_profile'),
   quitApp: () => invoke<void>('quit_app'),
   subscribe: (onSnapshot: (snapshot: Snapshot) => void) =>
     listen<Snapshot>('app-state', (event) => onSnapshot(event.payload)),

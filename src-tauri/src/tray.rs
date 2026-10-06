@@ -43,6 +43,8 @@ pub fn initialize(app: &AppHandle) -> tauri::Result<()> {
     let builder = TrayIconBuilder::with_id("status");
     #[cfg(target_os = "linux")]
     let builder = builder.temp_dir_path(create_icon_dir()?);
+    #[cfg(target_os = "macos")]
+    let builder = builder.title("Off");
     builder
         .icon(icon(Phase::Idle))
         .icon_as_template(false)
@@ -118,6 +120,35 @@ pub fn publish(app: &AppHandle) {
     });
 }
 
+fn selected_profile_name(polish: &stt_core::PolishSettings) -> Option<String> {
+    let selected = polish.profile_id.as_deref()?;
+    stt_core::builtin_polish_profiles()
+        .into_iter()
+        .chain(polish.custom_profiles.iter().cloned())
+        .find(|profile| profile.id == selected)
+        .map(|profile| profile.name)
+}
+
+fn mode_title(polish: &stt_core::PolishSettings) -> String {
+    match polish.profile_id.as_deref() {
+        None => "Off".into(),
+        Some("polish") => "Fix".into(),
+        Some("markdown") => "MD".into(),
+        Some("developer") => "Dev".into(),
+        Some(_) => selected_profile_name(polish)
+            .map(|name| {
+                let mut chars = name.chars();
+                let prefix: String = chars.by_ref().take(11).collect();
+                if chars.next().is_some() {
+                    format!("{prefix}…")
+                } else {
+                    prefix
+                }
+            })
+            .unwrap_or_else(|| "Off".into()),
+    }
+}
+
 fn recording_action(phase: Phase, has_api_key: bool) -> (&'static str, bool) {
     match phase {
         Phase::Synthesizing | Phase::Playing => ("Остановить озвучивание и начать запись", true),
@@ -149,7 +180,11 @@ fn refresh(app: &AppHandle, snapshot: &Snapshot) {
         }
         #[cfg(not(target_os = "linux"))]
         let _ = tray.set_icon(Some(icon(snapshot.phase)));
-        let _ = tray.set_tooltip(Some(format!("STT Simple — {label}")));
+        #[cfg(target_os = "macos")]
+        let _ = tray.set_title(Some(mode_title(&snapshot.settings.polish)));
+        let profile =
+            selected_profile_name(&snapshot.settings.polish).unwrap_or_else(|| "Выключено".into());
+        let _ = tray.set_tooltip(Some(format!("STT Simple — {label} — обработка: {profile}")));
     }
     if let Some(controls) = app.try_state::<Controls>() {
         let speaking = matches!(snapshot.phase, Phase::Synthesizing | Phase::Playing);
@@ -255,6 +290,26 @@ mod tests {
         .unwrap();
         assert!(retried);
         assert!(last_phase == Phase::Recording);
+    }
+
+    #[test]
+    fn tray_mode_labels_are_compact_and_safe() {
+        let mut polish = stt_core::PolishSettings::default();
+        assert_eq!(mode_title(&polish), "Off");
+        for (id, expected) in [("polish", "Fix"), ("markdown", "MD"), ("developer", "Dev")] {
+            polish.profile_id = Some(id.into());
+            assert_eq!(mode_title(&polish), expected);
+        }
+        polish.custom_profiles.push(stt_core::PolishProfile {
+            id: "custom-long".into(),
+            name: "Очень длинный профиль".into(),
+            instruction: "Test".into(),
+        });
+        polish.profile_id = Some("custom-long".into());
+        assert_eq!(mode_title(&polish), "Очень длинн…");
+        assert!(mode_title(&polish).chars().count() <= 12);
+        polish.profile_id = Some("missing".into());
+        assert_eq!(mode_title(&polish), "Off");
     }
 
     #[test]

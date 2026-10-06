@@ -122,6 +122,7 @@ describe('settings validation', () => {
       shortcut: ' Control + Super + R ',
       model: ' whisper-1 ',
       tts_shortcut: ' Control + Super + A ',
+      polish_shortcut: ' Control + Super + Backslash ',
       tts_model: ' gpt-4o-mini-tts ',
       tts_voice: ' marin ',
       input_device: 'mic-1',
@@ -132,6 +133,7 @@ describe('settings validation', () => {
       shortcut: 'Control+Super+R',
       model: 'whisper-1',
       tts_shortcut: 'Control+Super+A',
+      polish_shortcut: 'Control+Super+Backslash',
       tts_model: 'gpt-4o-mini-tts',
       tts_voice: 'marin',
       input_device: 'mic-1',
@@ -177,6 +179,7 @@ describe('settings validation', () => {
       { shortcut: 'Alt+R' },
       { model: 'whisper-1' },
       { tts_shortcut: 'Alt+A' },
+      { polish_shortcut: 'Alt+Backslash' },
       { tts_model: 'custom-tts' },
       { tts_voice: 'cedar' },
       { input_device: 'mic-1' },
@@ -202,7 +205,7 @@ describe('polishing settings and retry guards', () => {
   it('normalizes model, profile name and instruction without mutating the input', () => {
     const input = { ...withProfile, polish: { ...withProfile.polish, model: ' gpt-5 ', custom_profiles: [{ ...profile, name: ' Имя ', instruction: ' Первая\n  вторая ' }] } };
     const normalized = normalizeSettings(input);
-    expect(normalized.polish).toEqual({ profile_id: profile.id, model: 'gpt-5', effort: null, custom_profiles: [{ ...profile, name: 'Имя', instruction: 'Первая\n  вторая' }] });
+    expect(normalized.polish).toEqual({ profile_id: profile.id, model: 'gpt-5', effort: null, custom_profiles: [{ ...profile, name: 'Имя', instruction: 'Первая\n  вторая' }], favorite_profile_ids: [] });
     expect(input.polish.model).toBe(' gpt-5 ');
     expect(input.polish.custom_profiles[0]?.name).toBe(' Имя ');
   });
@@ -214,6 +217,7 @@ describe('polishing settings and retry guards', () => {
       { ...withProfile.polish, profile_id: null },
       { ...withProfile.polish, effort: 'none' },
       { ...withProfile.polish, custom_profiles: [] },
+      { ...withProfile.polish, favorite_profile_ids: [profile.id] },
       ...['id', 'name', 'instruction'].map((field) => ({ ...withProfile.polish, custom_profiles: [{ ...profile, [field]: 'different' }] })),
     ]) expect(settingsEqual(withProfile, { ...withProfile, polish })).toBe(false);
   });
@@ -249,6 +253,9 @@ describe('polishing settings and retry guards', () => {
       ].map((custom_profiles) => ({ ...settings.polish, custom_profiles })),
     ]) expect(validateSettings({ ...settings, polish })).not.toBeNull();
     expect(validateSettings(withProfile)).toBeNull();
+    expect(validateSettings({ ...withProfile, polish: { ...withProfile.polish, favorite_profile_ids: [profile.id] } })).toBeNull();
+    expect(validateSettings({ ...withProfile, polish: { ...withProfile.polish, favorite_profile_ids: [profile.id, profile.id] } })).toContain('не должны повторяться');
+    expect(validateSettings({ ...settings, polish: { ...settings.polish, favorite_profile_ids: ['missing'] } })).toContain('не найден');
     expect(validateSettings({ ...settings, polish: { ...settings.polish, custom_profiles: [
       { id: 'custom.v2:test', name: '😀'.repeat(80), instruction: '😀'.repeat(8000) },
     ] } })).toBeNull();

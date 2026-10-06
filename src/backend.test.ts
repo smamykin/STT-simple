@@ -22,6 +22,7 @@ describe('Tauri command contract', () => {
       [backend.resetStatistics, 'reset_statistics'],
       [backend.copyLastTranscript, 'copy_last_transcript'],
       [backend.retryPolish, 'retry_polish'],
+      [backend.cyclePolishProfile, 'cycle_polish_profile'],
       [backend.quitApp, 'quit_app'],
     ] as const;
     for (const [command, name] of commands) {

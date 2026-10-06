@@ -153,6 +153,7 @@ export function normalizeSettings(settings: Settings): Settings {
     shortcut: normalizeShortcut(settings.shortcut),
     model: settings.model.trim(),
     tts_shortcut: normalizeShortcut(settings.tts_shortcut),
+    polish_shortcut: normalizeShortcut(settings.polish_shortcut),
     tts_model: settings.tts_model.trim(),
     tts_voice: settings.tts_voice.trim(),
     input_device: settings.input_device,
@@ -161,6 +162,7 @@ export function normalizeSettings(settings: Settings): Settings {
     polish: {
       ...settings.polish,
       model: settings.polish.model.trim(),
+      favorite_profile_ids: [...settings.polish.favorite_profile_ids],
       custom_profiles: settings.polish.custom_profiles.map((profile) => ({
         ...profile, name: profile.name.trim(), instruction: profile.instruction.trim(),
       })),
@@ -169,7 +171,7 @@ export function normalizeSettings(settings: Settings): Settings {
 }
 
 
-function validateShortcut(shortcut: string, purpose: 'распознавания' | 'озвучивания'): string | null {
+function validateShortcut(shortcut: string, purpose: 'распознавания' | 'озвучивания' | 'обработки'): string | null {
   const value = shortcut.trim();
   if (!value || value.length > 128 || /[\u0000-\u001f\u007f]/.test(value)) {
     return `Укажите сочетание клавиш ${purpose}, например Super+R или Control+Super+R.`;
@@ -210,6 +212,12 @@ export function validateSettings(settings: Settings, builtinIds: readonly string
   if (polish.profile_id !== null && !ids.has(polish.profile_id)) {
     return 'Выберите существующий профиль обработки текста или выключите обработку.';
   }
+  const favorites = new Set<string>();
+  for (const id of polish.favorite_profile_ids) {
+    if (!ids.has(id)) return 'Избранный профиль обработки не найден.';
+    if (favorites.has(id)) return 'Избранные профили обработки не должны повторяться.';
+    favorites.add(id);
+  }
   if (settings.model.trim() !== settings.model || !ID_PATTERN.test(settings.model)) {
     return 'Укажите ID модели OpenAI: до 128 символов, латинские буквы, цифры, точка, дефис, подчёркивание или двоеточие. Без пробелов.';
   }
@@ -226,6 +234,8 @@ export function validateSettings(settings: Settings, builtinIds: readonly string
   if (sttShortcutError) return sttShortcutError;
   const ttsShortcutError = validateShortcut(settings.tts_shortcut, 'озвучивания');
   if (ttsShortcutError) return ttsShortcutError;
+  const polishShortcutError = validateShortcut(settings.polish_shortcut, 'обработки');
+  if (polishShortcutError) return polishShortcutError;
   if (shortcutIdentity(settings.shortcut) === shortcutIdentity(settings.tts_shortcut)) {
     return 'Сочетания клавиш распознавания и озвучивания не должны совпадать.';
   }
@@ -237,6 +247,7 @@ export function settingsEqual(left: Settings, right: Settings): boolean {
   return left.shortcut === right.shortcut
     && left.model === right.model
     && left.tts_shortcut === right.tts_shortcut
+    && left.polish_shortcut === right.polish_shortcut
     && left.tts_model === right.tts_model
     && left.tts_voice === right.tts_voice
     && left.input_device === right.input_device
@@ -245,6 +256,8 @@ export function settingsEqual(left: Settings, right: Settings): boolean {
     && left.polish.profile_id === right.polish.profile_id
     && left.polish.model === right.polish.model
     && left.polish.effort === right.polish.effort
+    && left.polish.favorite_profile_ids.length === right.polish.favorite_profile_ids.length
+    && left.polish.favorite_profile_ids.every((id, index) => id === right.polish.favorite_profile_ids[index])
     && left.polish.custom_profiles.length === right.polish.custom_profiles.length
     && left.polish.custom_profiles.every((profile, index) => {
       const other = right.polish.custom_profiles[index];

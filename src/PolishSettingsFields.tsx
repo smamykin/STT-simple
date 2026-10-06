@@ -60,6 +60,15 @@ export function PolishSettingsFields({ value, builtins, hasApiKey, onChange }: {
       profile.id === custom?.id ? { ...profile, [field]: text } : profile) });
   }
 
+  function toggleFavorite(id: string, checked: boolean) {
+    onChange({
+      ...value,
+      favorite_profile_ids: checked
+        ? [...value.favorite_profile_ids, id]
+        : value.favorite_profile_ids.filter((favoriteId) => favoriteId !== id),
+    });
+  }
+
   return (
     <section aria-labelledby="polish-heading">
       <div className="section-heading"><h2 id="polish-heading">Обработка текста</h2></div>
@@ -80,6 +89,19 @@ export function PolishSettingsFields({ value, builtins, hasApiKey, onChange }: {
         </select>
         <p className="help">Встроенные профили и их инструкции заданы приложением и доступны только для чтения.</p>
       </div>
+      <fieldset className="field favorite-profiles" aria-describedby="favorite-profiles-help">
+        <legend>Избранные профили для переключения</legend>
+        <div className="favorite-profile-list">
+          {profiles.map((profile) => <label className="checkbox-label" key={profile.id}>
+            <input type="checkbox" checked={value.favorite_profile_ids.includes(profile.id)}
+              aria-label={`Избранный профиль: ${profile.name || 'Без названия'}`}
+              onChange={(event) => toggleFavorite(profile.id, event.target.checked)} />
+            <span aria-hidden="true">{value.favorite_profile_ids.includes(profile.id) ? '★' : '☆'}</span>
+            <span>{profile.name || 'Без названия'}</span>
+          </label>)}
+        </div>
+        <p className="help" id="favorite-profiles-help">«Выключено» всегда участвует в цикле. Один избранный профиль превращает переключение в тумблер между ним и «Выключено».</p>
+      </fieldset>
       {selected && <div className="field">
         {custom && <>
           <label htmlFor="polish-name">Название профиля</label>
@@ -95,7 +117,8 @@ export function PolishSettingsFields({ value, builtins, hasApiKey, onChange }: {
           onClick={() => addProfile(selected)}>Дублировать профиль</button>}
         {custom && <button type="button" className="button button-danger-quiet button-small"
           onClick={() => onChange({ ...value, profile_id: null,
-            custom_profiles: value.custom_profiles.filter((profile) => profile.id !== custom.id) })}>Удалить профиль</button>}
+            custom_profiles: value.custom_profiles.filter((profile) => profile.id !== custom.id),
+            favorite_profile_ids: value.favorite_profile_ids.filter((id) => id !== custom.id) })}>Удалить профиль</button>}
       </div>
       <div className="field">
         <label htmlFor="polish-model">Модель обработки текста</label>
