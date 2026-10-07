@@ -210,6 +210,7 @@ mod tests {
                 id: "my-profile".into(),
                 name: "Личный профиль".into(),
                 instruction: "Исправь пунктуацию.".into(),
+                ..Default::default()
             }],
             favorite_profile_ids: vec!["my-profile".into()],
         };

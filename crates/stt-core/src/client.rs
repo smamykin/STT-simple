@@ -1,6 +1,6 @@
 use crate::{
-    polish::SYSTEM_INSTRUCTION, validate_model, validate_voice, PolishSettings, MAX_AUDIO_BYTES,
-    MAX_TTS_INPUT_CHARS,
+    polish::SYSTEM_INSTRUCTION, validate_model, validate_voice, PolishMode, PolishSettings,
+    MAX_AUDIO_BYTES, MAX_TTS_INPUT_CHARS,
 };
 use reqwest::header::{HeaderValue, AUTHORIZATION};
 use reqwest::multipart::{Form, Part};
@@ -166,6 +166,9 @@ impl OpenAiClient {
         if transcript.trim().is_empty() || transcript.len() > MAX_RESPONSE_BYTES {
             return Err("Текст для обработки должен быть непустым и не превышать 1 МиБ.".into());
         }
+        if profile.mode == PolishMode::Local {
+            return Ok(profile.apply_affixes(transcript));
+        }
         let api_key = api_key.trim();
         if api_key.is_empty() {
             return Err("Добавьте API-ключ OpenAI в настройках.".into());
@@ -226,6 +229,7 @@ impl OpenAiClient {
             )
             .await?,
         )
+        .map(|text| profile.apply_affixes(&text))
     }
 
     pub async fn transcribe(
@@ -865,6 +869,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn polish_applies_affixes_after_the_api_response() {
+        let settings = PolishSettings {
+            profile_id: Some("affixed".into()),
+            custom_profiles: vec![crate::PolishProfile {
+                id: "affixed".into(),
+                name: "С оформлением".into(),
+                instruction: "Preserve all details.".into(),
+                prefix: "[начало]\n".into(),
+                suffix: "\n[конец]".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let server = MockServer::start(200, &completed_output().to_string());
+        assert_eq!(
+            server
+                .client()
+                .polish(SECRET, &settings, PRIVATE_TEXT)
+                .await
+                .unwrap(),
+            "[начало]\nПривет, мир!\n[конец]"
+        );
+        server.finish();
+    }
+
+    #[tokio::test]
     async fn polish_custom_profile_and_model_are_forwarded() {
         let settings = PolishSettings {
             profile_id: Some("custom".into()),
@@ -873,6 +903,7 @@ mod tests {
                 id: "custom".into(),
                 name: "Личный".into(),
                 instruction: "Use short paragraphs.".into(),
+                ..Default::default()
             }],
             ..Default::default()
         };
@@ -1024,6 +1055,21 @@ mod tests {
                 .await
                 .unwrap(),
             " raw \n"
+        );
+        let local = PolishSettings {
+            profile_id: Some("local".into()),
+            custom_profiles: vec![crate::PolishProfile {
+                id: "local".into(),
+                name: "Local".into(),
+                mode: PolishMode::Local,
+                suffix: "\n[voice]".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            client.polish("", &local, " raw \n").await.unwrap(),
+            " raw \n\n[voice]"
         );
         for (key, text) in [
             ("", PRIVATE_TEXT),

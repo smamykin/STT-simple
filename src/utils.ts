@@ -201,11 +201,17 @@ export function validateSettings(settings: Settings, builtinIds: readonly string
     if (profile.id.trim() !== profile.id || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(profile.id) || ids.has(profile.id)) {
       return 'ID пользовательских профилей должны быть уникальными и не совпадать со встроенными.';
     }
-    if (!profile.name.trim() || !profile.instruction.trim()) {
-      return 'У каждого пользовательского профиля должны быть название и инструкция.';
+    if (!profile.name.trim()) return 'У каждого пользовательского профиля должно быть название.';
+    if (profile.mode !== 'llm' && profile.mode !== 'local') return 'Выберите допустимый способ обработки профиля.';
+    if (profile.mode === 'llm' && !profile.instruction.trim()) {
+      return 'Для обработки через OpenAI укажите инструкцию профиля.';
     }
-    if ([...profile.name].length > 80 || [...profile.instruction].length > 8000) {
-      return 'Название профиля — до 80 символов, инструкция — до 8000 символов.';
+    if (profile.mode === 'local' && !profile.prefix.trim() && !profile.suffix.trim()) {
+      return 'Для локального профиля укажите префикс или суффикс.';
+    }
+    if ([...profile.name].length > 80 || [...profile.instruction].length > 8000
+      || [...profile.prefix].length > 8000 || [...profile.suffix].length > 8000) {
+      return 'Название профиля — до 80 символов; инструкция, префикс и суффикс — до 8000 символов каждый.';
     }
     ids.add(profile.id);
   }
@@ -261,7 +267,9 @@ export function settingsEqual(left: Settings, right: Settings): boolean {
     && left.polish.custom_profiles.length === right.polish.custom_profiles.length
     && left.polish.custom_profiles.every((profile, index) => {
       const other = right.polish.custom_profiles[index];
-      return other !== undefined && profile.id === other.id && profile.name === other.name && profile.instruction === other.instruction;
+      return other !== undefined && profile.id === other.id && profile.name === other.name
+        && profile.mode === other.mode && profile.instruction === other.instruction
+        && profile.prefix === other.prefix && profile.suffix === other.suffix;
     });
 }
 

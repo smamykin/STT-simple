@@ -159,7 +159,7 @@ describe('polishing interface', () => {
   });
   it('loads builtin profiles from the snapshot and keeps their instructions immutable', async () => {
     const snapshot = makeSnapshot();
-    snapshot.builtin_polish_profiles[0] = { id: 'polish', name: 'Правка из core', instruction: 'Инструкция из core' };
+    snapshot.builtin_polish_profiles[0] = { id: 'polish', name: 'Правка из core', mode: 'llm', instruction: 'Инструкция из core', prefix: '', suffix: '' };
     await mount(snapshot);
     expect(screen.getByLabelText('Профиль обработки текста')).toHaveProperty('value', '');
     expect(screen.getByLabelText('Модель обработки текста')).toHaveProperty('value', 'gpt-6-luna');
@@ -181,7 +181,7 @@ describe('polishing interface', () => {
     const snapshot = makeSnapshot();
     snapshot.settings.polish = {
       ...snapshot.settings.polish,
-      custom_profiles: [{ id: 'custom-test', name: 'Мой профиль', instruction: 'Инструкция' }],
+      custom_profiles: [{ id: 'custom-test', name: 'Мой профиль', mode: 'llm', instruction: 'Инструкция', prefix: '', suffix: '' }],
       favorite_profile_ids: ['markdown'],
     };
     await mount(snapshot);
@@ -218,6 +218,27 @@ describe('polishing interface', () => {
     }
   });
 
+  it('edits and saves a local profile with exact prefix and suffix without an LLM instruction', async () => {
+    const snapshot = makeSnapshot();
+    await mount(snapshot);
+    backend.saveSettings.mockImplementation(async (settings: Settings) => ({ ...snapshot, settings }));
+    fireEvent.click(screen.getByRole('button', { name: 'Создать профиль' }));
+    expect(screen.getByLabelText('Способ обработки')).toHaveProperty('value', 'llm');
+    fireEvent.change(screen.getByLabelText('Способ обработки'), { target: { value: 'local' } });
+    expect(screen.queryByLabelText('Инструкция профиля')).toBeNull();
+    fireEvent.change(screen.getByLabelText('Префикс'), { target: { value: 'Диктовка:\n\n' } });
+    fireEvent.change(screen.getByLabelText('Суффикс'), { target: { value: '\n\nПроверь распознавание.' } });
+    expect(screen.getByLabelText('Префикс')).toHaveProperty('value', 'Диктовка:\n\n');
+    expect(screen.getByLabelText('Суффикс')).toHaveProperty('value', '\n\nПроверь распознавание.');
+    expect(screen.getByText(/не отправляет текст на дополнительную обработку OpenAI/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Сохранить настройки' }));
+    await waitFor(() => expect(backend.saveSettings).toHaveBeenCalledTimes(1));
+    expect(backend.saveSettings.mock.calls[0]?.[0].polish.custom_profiles).toEqual([expect.objectContaining({
+      name: 'Новый профиль', mode: 'local', instruction: '', prefix: 'Диктовка:\n\n',
+      suffix: '\n\nПроверь распознавание.',
+    })]);
+  });
+
   it('creates, edits and deletes custom profiles only through the existing settings save', async () => {
     let snapshot = makeSnapshot();
     await mount(snapshot);
@@ -239,7 +260,9 @@ describe('polishing interface', () => {
     fireEvent.change(screen.getByLabelText('Инструкция профиля'), { target: { value: ' Сохрани\nвсе детали. ' } });
     expect(backend.saveSettings).not.toHaveBeenCalled();
     await save();
-    expect(snapshot.settings.polish.custom_profiles).toEqual([{ id, name: 'Мой профиль', instruction: 'Сохрани\nвсе детали.' }]);
+    expect(snapshot.settings.polish.custom_profiles).toEqual([{
+      id, name: 'Мой профиль', mode: 'llm', instruction: 'Сохрани\nвсе детали.', prefix: '', suffix: '',
+    }]);
     expect(snapshot.settings.polish.profile_id).toBe(id);
     fireEvent.change(screen.getByLabelText('Название профиля'), { target: { value: 'Правка' } });
     fireEvent.change(screen.getByLabelText('Инструкция профиля'), { target: { value: 'Новая инструкция' } });
@@ -248,7 +271,9 @@ describe('polishing interface', () => {
     expect(screen.getByLabelText('Название профиля')).toHaveProperty('value', 'Правка');
     expect(screen.getByLabelText('Инструкция профиля')).toHaveProperty('value', 'Новая инструкция');
     await save();
-    expect(snapshot.settings.polish.custom_profiles).toEqual([{ id, name: 'Правка', instruction: 'Новая инструкция' }]);
+    expect(snapshot.settings.polish.custom_profiles).toEqual([{
+      id, name: 'Правка', mode: 'llm', instruction: 'Новая инструкция', prefix: '', suffix: '',
+    }]);
     fireEvent.click(screen.getByRole('button', { name: 'Удалить профиль' }));
     expect(screen.getByLabelText('Профиль обработки текста')).toHaveProperty('value', '');
     expect(snapshot.settings.polish.custom_profiles).toHaveLength(1);
@@ -294,7 +319,7 @@ describe('polishing interface', () => {
     snapshot.settings.polish = {
       ...snapshot.settings.polish,
       profile_id: 'custom-test',
-      custom_profiles: [{ id: 'custom-test', name: 'Мой профиль', instruction: 'Инструкция' }],
+      custom_profiles: [{ id: 'custom-test', name: 'Мой профиль', mode: 'llm', instruction: 'Инструкция', prefix: '', suffix: '' }],
       favorite_profile_ids: ['polish', 'custom-test'],
     };
     await mount(snapshot);
@@ -328,7 +353,7 @@ describe('polishing interface', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Создать профиль' }));
     fireEvent.change(screen.getByLabelText('Профиль обработки текста'), { target: { value: '' } });
     fireEvent.click(screen.getByRole('button', { name: 'Сохранить настройки' }));
-    expect(await screen.findByText(/должны быть название и инструкция/)).toBeTruthy();
+    expect(await screen.findByText(/через OpenAI укажите инструкцию/)).toBeTruthy();
     expect(backend.saveSettings).not.toHaveBeenCalled();
     const option = screen.getByRole('option', { name: 'Новый профиль' }) as HTMLOptionElement;
     fireEvent.change(screen.getByLabelText('Профиль обработки текста'), { target: { value: option.value } });
@@ -379,7 +404,7 @@ describe('polishing interface', () => {
   it.each(['recording', 'transcribing', 'polishing', 'synthesizing', 'playing'] as const)('locks custom profile editing during %s', async (phase) => {
     const snapshot = makeSnapshot({ phase });
     snapshot.settings.polish = { ...snapshot.settings.polish, profile_id: 'custom-test',
-      custom_profiles: [{ id: 'custom-test', name: 'Профиль', instruction: 'Инструкция' }] };
+      custom_profiles: [{ id: 'custom-test', name: 'Профиль', mode: 'llm', instruction: 'Инструкция', prefix: '', suffix: '' }] };
     await mount(snapshot);
     for (const label of ['Название профиля', 'Инструкция профиля']) {
       expect(screen.getByLabelText(label).matches(':disabled')).toBe(true);
