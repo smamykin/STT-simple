@@ -66,7 +66,18 @@ pub struct TtsSession {
     pub player: Option<Player>,
 }
 
+pub struct ProcessingResult {
+    pub output: Option<Result<String, String>>,
+    pub cancelled: bool,
+}
+
+pub struct Processing {
+    pub id: u64,
+    pub cancel: tokio::sync::watch::Sender<bool>,
+}
+
 pub struct Data {
+    pub processing: Option<Processing>,
     pub tts_session: Option<TtsSession>,
     pub next_tts_session_id: u64,
     pub tts_hotkey_available: bool,
@@ -91,6 +102,54 @@ pub struct Data {
 }
 
 impl Data {
+    pub fn begin_processing(&mut self) -> (u64, tokio::sync::watch::Receiver<bool>) {
+        self.next_session_id = self.next_session_id.wrapping_add(1);
+        let id = self.next_session_id;
+        let (cancel, receiver) = tokio::sync::watch::channel(false);
+        self.processing = Some(Processing { id, cancel });
+        (id, receiver)
+    }
+
+    pub fn processing_active(&self, id: u64) -> bool {
+        matches!(self.phase, Phase::Transcribing | Phase::Polishing)
+            && self.processing.as_ref().map(|job| job.id) == Some(id)
+    }
+
+    pub fn request_processing_stop(&self) {
+        if let Some(job) = &self.processing {
+            let _ = job.cancel.send(true);
+        }
+    }
+
+    pub fn complete_processing(
+        &mut self,
+        id: u64,
+        output: Option<Result<String, String>>,
+    ) -> Option<ProcessingResult> {
+        if !self.processing_active(id) {
+            return None;
+        }
+        let cancelled = *self.processing.as_ref()?.cancel.borrow();
+        let output = if cancelled || output.is_none() {
+            self.cancelled_output().map(Ok)
+        } else {
+            output
+        };
+        if let Some(Ok(text)) = &output {
+            self.accept_output(text.clone());
+        }
+        self.processing = None;
+        Some(ProcessingResult { output, cancelled })
+    }
+
+    fn cancelled_output(&self) -> Option<String> {
+        if self.phase == Phase::Polishing {
+            self.last_raw_transcript.clone()
+        } else {
+            None
+        }
+    }
+
     pub fn tts_active(&self, id: u64) -> bool {
         matches!(self.phase, Phase::Synthesizing | Phase::Playing)
             && self.tts_session.as_ref().map(|session| session.id) == Some(id)
@@ -288,6 +347,7 @@ mod tests {
 
     fn idle_data() -> Data {
         Data {
+            processing: None,
             stored: StoredData::default(),
             phase: Phase::Idle,
             session: None,
@@ -532,6 +592,96 @@ mod tests {
     }
 
     #[test]
+    fn cancelling_processing_signals_worker_and_keeps_busy_until_acknowledgement() {
+        let mut data = idle_data();
+        data.phase = Phase::Transcribing;
+        let (id, cancellation) = data.begin_processing();
+        data.request_processing_stop();
+        assert!(*cancellation.borrow());
+        assert!(data.processing_active(id));
+        assert!(data.ensure_idle().is_err());
+        assert!(data.cancelled_output().is_none());
+        let (new_id, new_cancellation) = data.begin_processing();
+        assert!(!data.processing_active(id));
+        assert!(data.processing_active(new_id));
+        assert!(!*new_cancellation.borrow());
+    }
+
+    #[test]
+    fn cancelled_polish_preserves_raw_output_and_clears_retry_after_publishing() {
+        let mut data = idle_data();
+        data.phase = Phase::Transcribing;
+        let (id, cancellation) = data.begin_processing();
+        data.accept_transcript("исходный текст".into(), selected_polish())
+            .unwrap();
+        data.request_processing_stop();
+        assert!(*cancellation.borrow());
+        assert!(data.processing_active(id));
+        let result = data
+            .complete_processing(id, Some(Ok("запоздалый результат".into())))
+            .unwrap();
+        assert!(result.cancelled);
+        assert_eq!(result.output, Some(Ok("исходный текст".into())));
+        assert!(data.processing.is_none());
+        data.phase = Phase::Idle;
+        assert_eq!(data.last_transcript.as_deref(), Some("исходный текст"));
+        assert_eq!(data.last_raw_transcript.as_deref(), Some("исходный текст"));
+        assert!(!data.snapshot().can_retry_polish);
+    }
+
+    #[test]
+    fn cancellation_at_commit_overrides_ready_success_and_error() {
+        for output in [Ok("late polished text".into()), Err("late error".into())] {
+            let mut data = failed_polish();
+            data.begin_retry().unwrap();
+            let (id, _cancellation) = data.begin_processing();
+            data.request_processing_stop();
+            let result = data.complete_processing(id, Some(output)).unwrap();
+            assert!(result.cancelled);
+            assert_eq!(result.output, Some(Ok("raw".into())));
+            assert!(data.processing.is_none());
+            assert_eq!(data.last_transcript.as_deref(), Some("raw"));
+            assert!(data.pending_polish.is_none());
+        }
+    }
+
+    #[test]
+    fn cancelled_transcription_never_publishes_a_ready_response_or_old_raw_text() {
+        let mut data = idle_data();
+        data.last_raw_transcript = Some("old raw".into());
+        data.phase = Phase::Transcribing;
+        let (id, _cancellation) = data.begin_processing();
+        data.request_processing_stop();
+        let result = data
+            .complete_processing(id, Some(Ok("late transcript".into())))
+            .unwrap();
+        assert!(result.cancelled);
+        assert!(result.output.is_none());
+        data.phase = Phase::Transcribing;
+        let (new_id, _new_cancellation) = data.begin_processing();
+        assert!(data
+            .complete_processing(id, Some(Ok("stale".into())))
+            .is_none());
+        let current = data
+            .complete_processing(new_id, Some(Ok("current".into())))
+            .unwrap();
+        assert!(!current.cancelled);
+        assert_eq!(current.output, Some(Ok("current".into())));
+        assert_eq!(data.last_transcript.as_deref(), Some("current"));
+        assert!(data.processing.is_none());
+    }
+
+    #[test]
+    fn retry_polish_can_be_cancelled_without_losing_raw_text() {
+        let mut data = failed_polish();
+        data.begin_retry().unwrap();
+        let (_, cancellation) = data.begin_processing();
+        data.request_processing_stop();
+        assert!(*cancellation.borrow());
+        assert_eq!(data.cancelled_output().as_deref(), Some("raw"));
+    }
+
+    #[test]
     fn disabled_polish_keeps_raw_and_only_publishes_successful_output() {
         let mut data = idle_data();
         data.phase = Phase::Transcribing;
@@ -672,6 +822,7 @@ mod tests {
     #[test]
     fn idle_snapshot_contains_no_secrets_or_session_data() {
         let data = Data {
+            processing: None,
             tts_session: None,
             next_tts_session_id: 0,
             tts_hotkey_available: false,
@@ -709,6 +860,7 @@ mod tests {
     #[test]
     fn busy_state_blocks_configuration_changes() {
         let data = Data {
+            processing: None,
             tts_session: None,
             next_tts_session_id: 0,
             tts_hotkey_available: false,
