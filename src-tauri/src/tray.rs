@@ -158,6 +158,15 @@ fn recording_action(phase: Phase, has_api_key: bool) -> (&'static str, bool) {
     }
 }
 
+fn cancellation_action(phase: Phase) -> (&'static str, bool) {
+    match phase {
+        Phase::Recording => ("Отменить запись", true),
+        Phase::Transcribing => ("Отменить распознавание", true),
+        Phase::Polishing => ("Отменить обработку и оставить исходный текст", true),
+        _ => ("Отменить запись", false),
+    }
+}
+
 fn refresh(app: &AppHandle, snapshot: &Snapshot) {
     let label = match snapshot.phase {
         Phase::Idle => "Готово к записи",
@@ -205,9 +214,9 @@ fn refresh(app: &AppHandle, snapshot: &Snapshot) {
             recording_action(snapshot.phase, snapshot.has_api_key);
         let _ = controls.toggle.set_text(recording_label);
         let _ = controls.toggle.set_enabled(recording_enabled);
-        let _ = controls
-            .cancel
-            .set_enabled(snapshot.phase == Phase::Recording);
+        let (cancel_label, cancel_enabled) = cancellation_action(snapshot.phase);
+        let _ = controls.cancel.set_text(cancel_label);
+        let _ = controls.cancel.set_enabled(cancel_enabled);
         let _ = controls
             .copy
             .set_enabled(snapshot.phase == Phase::Idle && snapshot.last_transcript.is_some());
@@ -325,6 +334,19 @@ mod tests {
         for phase in [Phase::Transcribing, Phase::Polishing] {
             assert!(!recording_action(phase, true).1);
         }
+    }
+
+    #[test]
+    fn tray_cancellation_is_available_throughout_dictation() {
+        for phase in [Phase::Recording, Phase::Transcribing, Phase::Polishing] {
+            assert!(cancellation_action(phase).1);
+        }
+        for phase in [Phase::Idle, Phase::Synthesizing, Phase::Playing] {
+            assert!(!cancellation_action(phase).1);
+        }
+        assert!(cancellation_action(Phase::Polishing)
+            .0
+            .contains("исходный текст"));
     }
 
     #[test]

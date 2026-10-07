@@ -379,13 +379,14 @@ async fn toggle(
             }
         }
         Phase::Recording => {
-            let session = {
+            let (session, id, mut cancellation) = {
                 let mut data = runtime.data.lock().expect("application state poisoned");
                 match data.session.take() {
                     Some(session) => {
                         data.phase = Phase::Transcribing;
                         data.last_error = None;
-                        session
+                        let (id, cancellation) = data.begin_processing();
+                        (session, id, cancellation)
                     }
                     None => {
                         drop(data);
@@ -396,6 +397,7 @@ async fn toggle(
                     }
                 }
             };
+            drop(guard);
             tray::publish(app);
             let Session {
                 recorder,
@@ -418,51 +420,94 @@ async fn toggle(
                 blocking(move || stt_core::encode_wav(&audio.mono_samples, audio.sample_rate)).await
             }
             .await;
-            drop(guard);
-            let recognized = match prepared {
-                Ok(wav) => runtime.client.transcribe(&api_key, &model, wav).await,
-                Err(error) => Err(error),
+            let recognized = cancellable(&mut cancellation, async {
+                match prepared {
+                    Ok(wav) => runtime.client.transcribe(&api_key, &model, wav).await,
+                    Err(error) => Err(error),
+                }
+            })
+            .await;
+            let Some(recognized) = recognized else {
+                return finish_processing(app, id, None, false, paste_shortcut).await;
             };
             let processed = match recognized {
                 Ok(raw) => {
-                    let selected = runtime
-                        .data
-                        .lock()
-                        .expect("application state poisoned")
-                        .accept_transcript(raw.clone(), polish.clone());
+                    let selected = {
+                        let _transition = runtime.control.lock().await;
+                        let mut data = runtime.data.lock().expect("application state poisoned");
+                        if !data.processing_active(id) {
+                            return Ok(());
+                        }
+                        if *cancellation.borrow() {
+                            None
+                        } else {
+                            Some(data.accept_transcript(raw.clone(), polish.clone()))
+                        }
+                    };
                     tray::publish(app);
                     match selected {
-                        Ok(true) => runtime.client.polish(&api_key, &polish, &raw).await,
-                        Ok(false) => Ok(raw),
-                        Err(error) => Err(error),
-                    }
-                }
-                Err(error) => Err(error),
-            };
-            // Finalize under the control lock: readiness, result and error are one commit.
-            let _completion = runtime.control.lock().await;
-            let result = match processed {
-                Ok(text) => {
-                    let _clipboard = runtime.clipboard.lock().await;
-                    runtime
-                        .data
-                        .lock()
-                        .expect("application state poisoned")
-                        .accept_output(text.clone());
-                    match clipboard::write_text(app, text).await {
-                        Ok(()) if auto_paste && origin.finishes_auto_paste() => {
-                            auto_paste::paste(paste_shortcut).await
+                        Some(Ok(true)) => {
+                            cancellable(
+                                &mut cancellation,
+                                runtime.client.polish(&api_key, &polish, &raw),
+                            )
+                            .await
                         }
-                        result => result,
+                        Some(Ok(false)) => Some(Ok(raw)),
+                        Some(Err(error)) => Some(Err(error)),
+                        None => None,
                     }
                 }
-                Err(error) => Err(error),
+                Err(error) => Some(Err(error)),
             };
-            commit_idle(app, result.as_ref().err().cloned());
-            result
+            finish_processing(
+                app,
+                id,
+                processed,
+                auto_paste && origin.finishes_auto_paste(),
+                paste_shortcut,
+            )
+            .await
         }
         Phase::Transcribing | Phase::Polishing | Phase::Synthesizing | Phase::Playing => Ok(()),
     }
+}
+
+// The worker acknowledges cancellation after microphone preparation has completed.
+// Only this generation may commit output or return the application to idle.
+async fn finish_processing(
+    app: &AppHandle,
+    id: u64,
+    processed: Option<Result<String, String>>,
+    auto_paste: bool,
+    paste_shortcut: stt_core::PasteShortcut,
+) -> Result<(), String> {
+    let runtime = app.state::<Runtime>();
+    // Finalize under the control lock: readiness, result and error are one commit.
+    let _completion = runtime.control.lock().await;
+    let outcome = runtime
+        .data
+        .lock()
+        .expect("application state poisoned")
+        .complete_processing(id, processed);
+    let Some(outcome) = outcome else {
+        return Ok(());
+    };
+    let result = match outcome.output {
+        Some(Ok(text)) => {
+            let _clipboard = runtime.clipboard.lock().await;
+            match clipboard::write_text(app, text).await {
+                Ok(()) if auto_paste && !outcome.cancelled => {
+                    auto_paste::paste(paste_shortcut).await
+                }
+                result => result,
+            }
+        }
+        Some(Err(error)) => Err(error),
+        None => Ok(()),
+    };
+    commit_idle(app, result.as_ref().err().cloned());
+    result
 }
 
 // Prefer cancellation even when the operation becomes ready in the same poll.
@@ -823,25 +868,27 @@ async fn retry_polish(app: AppHandle) -> Result<(), String> {
         .lock()
         .expect("application state poisoned")
         .begin_retry()?;
+    let (id, mut cancellation) = runtime
+        .data
+        .lock()
+        .expect("application state poisoned")
+        .begin_processing();
     tray::publish(&app);
     drop(guard);
-    let polished = runtime.client.polish(&key, &settings, &raw).await;
-    let _completion = runtime.control.lock().await;
-    let result = match polished {
-        Ok(text) => {
-            runtime
-                .data
-                .lock()
-                .expect("application state poisoned")
-                .accept_output(text.clone());
-            let _clipboard = runtime.clipboard.lock().await;
-            // A retry may run in a different focused application: never synthesize paste.
-            clipboard::write_text(&app, text).await
-        }
-        Err(error) => Err(error),
-    };
-    commit_idle(&app, result.as_ref().err().cloned());
-    result
+    let polished = cancellable(
+        &mut cancellation,
+        runtime.client.polish(&key, &settings, &raw),
+    )
+    .await;
+    // A retry may run in a different focused application: never synthesize paste.
+    finish_processing(
+        &app,
+        id,
+        polished,
+        false,
+        runtime.snapshot().settings.paste_shortcut,
+    )
+    .await
 }
 
 async fn add_statistics(app: &AppHandle, seconds: f64) {
@@ -913,12 +960,23 @@ async fn cancel(
     reason: Option<String>,
 ) -> Result<(), String> {
     let runtime = app.state::<Runtime>();
+    // Signal the current processing generation immediately. Waiting for the control lock here
+    // would let a ready response commit before an already requested cancellation.
+    if expected_session.is_none() {
+        let data = runtime.data.lock().expect("application state poisoned");
+        if matches!(data.phase, Phase::Transcribing | Phase::Polishing) {
+            data.request_processing_stop();
+            return Ok(());
+        }
+    }
+
     let _guard = match runtime.control.try_lock() {
         Ok(guard) => guard,
         Err(_) => return Ok(()),
     };
     let session = {
         let mut data = runtime.data.lock().expect("application state poisoned");
+
         if data.phase != Phase::Recording {
             return Ok(());
         }
@@ -980,6 +1038,7 @@ pub(crate) fn shutdown(app: &AppHandle) {
     if let Some(runtime) = app.try_state::<Runtime>() {
         let mut data = runtime.data.lock().expect("application state poisoned");
         data.stop_tts();
+        data.request_processing_stop();
         let session = data.session.take();
         drop(data);
         drop(session);
@@ -1132,7 +1191,7 @@ pub fn run() {
             };
             let client = OpenAiClient::new().map_err(std::io::Error::other)?;
             app.manage(Runtime {
-                data: Mutex::new(Data { tts_session: None, next_tts_session_id: 0,
+                data: Mutex::new(Data { processing: None, tts_session: None, next_tts_session_id: 0,
                     tts_hotkey_available: false, tts_hotkey_command: None, tts_hotkey_message: None,
                     polish_hotkey_available: false, polish_hotkey_command: if wayland { Some(shortcuts::wayland_polish_command()) } else { None }, polish_hotkey_message: None,
                     stored, phase: Phase::Idle, session: None, next_session_id: 0,
@@ -1188,6 +1247,7 @@ mod tests {
     fn models_runtime(phase: Phase) -> Runtime {
         Runtime {
             data: Mutex::new(Data {
+                processing: None,
                 tts_session: None,
                 next_tts_session_id: 0,
                 tts_hotkey_available: false,
