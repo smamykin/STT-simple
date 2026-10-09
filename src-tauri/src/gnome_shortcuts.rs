@@ -1,8 +1,8 @@
 //! Ubuntu GNOME Wayland custom shortcuts, without spawning `gsettings`.
 //!
-//! On Wayland, `save_settings` calls `apply` to install/update the shortcut;
-//! startup calls the read-only `verify`. Both take the quoted absolute executable
-//! + `--toggle` from `shortcuts::wayland_command`. This module is Linux-only.
+//! `apply_recording_and_polish` installs/updates both shortcuts together;
+//! `verify` and `verify_polish` check each registration without writing. Commands
+//! contain a quoted absolute executable plus the action's flag. Linux-only.
 //!
 //! GSettings has no compare-and-swap, cross-path transaction, or compositor grab
 //! acknowledgement. We check ownership, conflicts, writability and readbacks;
@@ -15,7 +15,7 @@
 //! GTK keysyms represent the usual layout's key, not a physical Tauri keycode;
 //! unusual/unsupported codes are rejected rather than guessed. Mutter's physical
 //! `Above_Tab` bindings are another layout-dependent exception. Ownership is a
-//! conservative metadata check (name, valid --toggle command, executable basename),
+//! conservative metadata check (name, action-specific command, executable basename),
 //! not an authenticated marker; relocation with the same basename is supported.
 
 use gio::prelude::*;
@@ -28,28 +28,78 @@ const CUSTOM: &str = "org.gnome.settings-daemon.plugins.media-keys.custom-keybin
 const LIST: &str = "custom-keybindings";
 const PATH: &str = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/stt-simple/";
 const NAME: &str = "STT Simple";
+const POLISH_PATH: &str =
+    "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/stt-simple-polish/";
+const POLISH_NAME: &str = "STT Simple — обработка";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Action {
+    Recording,
+    Polish,
+}
+impl Action {
+    fn path(self) -> &'static str {
+        match self {
+            Self::Recording => PATH,
+            Self::Polish => POLISH_PATH,
+        }
+    }
+    fn name(self) -> &'static str {
+        match self {
+            Self::Recording => NAME,
+            Self::Polish => POLISH_NAME,
+        }
+    }
+    fn flag(self) -> &'static str {
+        match self {
+            Self::Recording => "--toggle",
+            Self::Polish => "--cycle-polish",
+        }
+    }
+    fn keys(self) -> [Key; 3] {
+        match self {
+            Self::Recording => OWN_KEYS,
+            Self::Polish => [Key::PolishName, Key::PolishCommand, Key::PolishBinding],
+        }
+    }
+}
 static SERIAL: Mutex<()> = Mutex::new(());
 
 /// Check the configured shortcut and command without changing any settings.
 /// Missing/stale registration is an error: explicitly save settings to repair it.
 pub fn verify(shortcut: &str, command: &str) -> Result<(), String> {
+    verify_action(Action::Recording, shortcut, command)
+}
+
+/// Check the polish-cycle shortcut and command without changing any settings.
+pub fn verify_polish(shortcut: &str, command: &str) -> Result<(), String> {
+    verify_action(Action::Polish, shortcut, command)
+}
+
+fn verify_action(action: Action, shortcut: &str, command: &str) -> Result<(), String> {
     let _guard = SERIAL.lock().map_err(|_| {
         "Не удалось получить блокировку настройки сочетания клавиш. Перезапустите STT Simple."
     })?;
     check_session()?;
-    let desired = Desired::new(shortcut, command)?;
+    let desired = Desired::for_action(action, shortcut, command)?;
     verify_store(&Gnome::open()?, &desired)
 }
 
-/// Create/update only the STT Simple custom shortcut. No other binding is removed
-/// to resolve conflicts. On failure, attempt a conditional, narrowly scoped rollback.
-pub fn apply(shortcut: &str, command: &str) -> Result<(), String> {
+/// Preflight and update recording and polish together. No foreign binding is
+/// removed to resolve conflicts. Failures conditionally roll back both actions.
+pub fn apply_recording_and_polish(
+    stt_shortcut: &str,
+    stt_command: &str,
+    polish_shortcut: &str,
+    polish_command: &str,
+) -> Result<(), String> {
     let _guard = SERIAL.lock().map_err(|_| {
         "Не удалось получить блокировку настройки сочетания клавиш. Перезапустите STT Simple."
     })?;
     check_session()?;
-    let desired = Desired::new(shortcut, command)?;
-    apply_store(&Gnome::open()?, &desired)
+    let recording = Desired::for_action(Action::Recording, stt_shortcut, stt_command)?;
+    let polish = Desired::for_action(Action::Polish, polish_shortcut, polish_command)?;
+    apply_stores(&Gnome::open()?, &[&recording, &polish])
 }
 
 fn check_session() -> Result<(), String> {
@@ -245,18 +295,19 @@ fn key_name(code: Code) -> Result<String, String> {
 }
 
 // GNOME uses g_shell_parse_argv, not a shell. Accept exactly a quoted absolute
-// executable and --toggle; reject extra arguments, expansion and relative paths.
-fn executable(command: &str) -> Result<String, String> {
+// executable and the action's flag; reject extra arguments and relative paths.
+fn action_executable(action: Action, command: &str) -> Result<String, String> {
+    let flag = action.flag();
     if !command.starts_with(['\'', '"']) || command.contains('\0') || command.contains('\n') {
         return Err(
-            "Команда сочетания должна содержать абсолютный путь к исполняемому файлу в кавычках и аргумент --toggle.".into(),
+            format!("Команда сочетания должна содержать абсолютный путь к исполняемому файлу в кавычках и аргумент {flag}."),
         );
     }
     let argv = glib::shell_parse_argv(command)
         .map_err(|e| format!("Некорректная команда сочетания клавиш: {e}"))?;
-    if argv.len() != 2 || argv[1] != "--toggle" || !Path::new(&argv[0]).is_absolute() {
+    if argv.len() != 2 || argv[1] != flag || !Path::new(&argv[0]).is_absolute() {
         return Err(
-            "Команда сочетания должна содержать только абсолютный путь к исполняемому файлу в кавычках и аргумент --toggle.".into(),
+            format!("Команда сочетания должна содержать только абсолютный путь к исполняемому файлу в кавычках и аргумент {flag}."),
         );
     }
     argv[0].clone().into_string().map_err(|_| {
@@ -265,26 +316,32 @@ fn executable(command: &str) -> Result<String, String> {
 }
 
 struct Desired {
+    action: Action,
     binding: String,
     accelerator: Accelerator,
     command: String,
     executable: String,
 }
 impl Desired {
+    #[cfg(test)]
     fn new(shortcut: &str, command: &str) -> Result<Self, String> {
+        Self::for_action(Action::Recording, shortcut, command)
+    }
+    fn for_action(action: Action, shortcut: &str, command: &str) -> Result<Self, String> {
         let (binding, accelerator) = gtk_shortcut(shortcut)?;
         Ok(Self {
+            action,
             binding,
             accelerator,
             command: command.into(),
-            executable: executable(command)?,
+            executable: action_executable(action, command)?,
         })
     }
     fn value(&self, key: Key) -> Variant {
         match key {
-            Key::Name => NAME.to_variant(),
-            Key::Command => self.command.to_variant(),
-            Key::Binding => self.binding.to_variant(),
+            Key::Name | Key::PolishName => self.action.name().to_variant(),
+            Key::Command | Key::PolishCommand => self.command.to_variant(),
+            Key::Binding | Key::PolishBinding => self.binding.to_variant(),
             Key::List => unreachable!(),
         }
     }
@@ -296,14 +353,17 @@ enum Key {
     Name,
     Command,
     Binding,
+    PolishName,
+    PolishCommand,
+    PolishBinding,
 }
 impl Key {
     fn name(self) -> &'static str {
         match self {
             Self::List => LIST,
-            Self::Name => "name",
-            Self::Command => "command",
-            Self::Binding => "binding",
+            Self::Name | Self::PolishName => "name",
+            Self::Command | Self::PolishCommand => "command",
+            Self::Binding | Self::PolishBinding => "binding",
         }
     }
 }
@@ -318,7 +378,7 @@ trait Store {
     fn read(&self, key: Key) -> Saved;
     fn writable(&self, key: Key) -> bool;
     fn write(&self, key: Key, value: Option<&Variant>) -> Result<(), String>;
-    fn conflicts(&self, target: Accelerator) -> Result<(), String>;
+    fn conflicts(&self, target: Accelerator, owned: &[&Desired]) -> Result<(), String>;
 }
 
 fn paths(store: &impl Store) -> Result<Vec<String>, String> {
@@ -331,8 +391,12 @@ fn text(value: &Saved) -> Result<&str, String> {
         "Схема пользовательского сочетания GNOME содержит значение неожиданного типа.".into()
     })
 }
+fn action_snapshot(store: &impl Store, action: Action) -> [Saved; 3] {
+    action.keys().map(|key| store.read(key))
+}
+#[cfg(test)]
 fn own_snapshot(store: &impl Store) -> [Saved; 3] {
-    OWN_KEYS.map(|key| store.read(key))
+    action_snapshot(store, Action::Recording)
 }
 fn ownership(own: &[Saved; 3], desired: &Desired) -> Result<(), String> {
     // Only a completely unused path, or recognizable STT Simple data, is ours.
@@ -342,26 +406,26 @@ fn ownership(own: &[Saved; 3], desired: &Desired) -> Result<(), String> {
     {
         return Ok(());
     }
-    let old_executable = executable(text(&own[1])?).ok();
-    if text(&own[0])? == NAME
+    let old_executable = action_executable(desired.action, text(&own[1])?).ok();
+    if text(&own[0])? == desired.action.name()
         && old_executable.as_ref().is_some_and(|old| {
             Path::new(old).file_name() == Path::new(&desired.executable).file_name()
         })
     {
         return Ok(());
     }
-    Err(format!("Зарезервированный путь сочетания STT Simple {PATH} содержит посторонние данные. Переместите или удалите эту запись вручную в настройках GNOME; приложение не будет её перезаписывать."))
+    Err(format!("Зарезервированный путь сочетания STT Simple {} содержит посторонние данные. Переместите или удалите эту запись вручную в настройках GNOME; приложение не будет её перезаписывать.", desired.action.path()))
 }
 
 fn verify_store(store: &impl Store, desired: &Desired) -> Result<(), String> {
-    let own = own_snapshot(store);
+    let own = action_snapshot(store, desired.action);
     ownership(&own, desired)?;
-    store.conflicts(desired.accelerator)?;
-    if !paths(store)?.iter().any(|p| p == PATH)
-        || own[0].value.str() != Some(NAME)
+    store.conflicts(desired.accelerator, &[desired])?;
+    if !paths(store)?.iter().any(|p| p == desired.action.path())
+        || own[0].value.str() != Some(desired.action.name())
         || own[1].value.str() != Some(desired.command.as_str())
         || accelerator(text(&own[2])?).ok() != Some(desired.accelerator)
-        || own_snapshot(store) != own
+        || action_snapshot(store, desired.action) != own
     {
         return Err("Сочетание STT Simple в GNOME отсутствует или отличается от настроек приложения. Сохраните настройки, чтобы создать или обновить его, либо проверьте настройки GNOME → Клавиатура → Пользовательские комбинации.".into());
     }
@@ -409,69 +473,115 @@ fn put(
     Ok(())
 }
 
+#[cfg(test)]
 fn apply_store(store: &impl Store, desired: &Desired) -> Result<(), String> {
-    let initial = own_snapshot(store);
-    ownership(&initial, desired)?;
-    store.conflicts(desired.accelerator)?;
-    let initial_paths = paths(store)?;
-    // Check locks before making the first change, including the list when needed.
-    for (key, old) in OWN_KEYS.into_iter().zip(&initial) {
-        if old.value != desired.value(key) && !store.writable(key) {
-            return Err(format!(
-                "Параметр GNOME {} недоступен для записи. Проверьте блокировки dconf, установленные администратором.",
-                key.name()
-            ));
-        }
-    }
-    if !initial_paths.iter().any(|p| p == PATH) && !store.writable(Key::List) {
+    apply_stores(store, &[desired])
+}
+
+fn unchanged(
+    store: &impl Store,
+    desired: &[&Desired],
+    expected: &[[Saved; 3]],
+) -> Result<(), String> {
+    if desired
+        .iter()
+        .zip(expected)
+        .any(|(d, old)| action_snapshot(store, d.action) != *old)
+    {
         return Err(
-            "Список пользовательских сочетаний GNOME заблокирован. Проверьте блокировки dconf, установленные администратором.".into(),
+            "Сочетание STT Simple было изменено другим процессом. Повторите сохранение настроек."
+                .into(),
         );
     }
-    let mut journal = Vec::new();
-    let result = (|| {
-        let mut expected = initial;
-        for (i, key) in OWN_KEYS.into_iter().enumerate() {
-            if own_snapshot(store) != expected {
-                return Err(
-                    "Сочетание STT Simple было изменено другим процессом. Повторите сохранение настроек.".into(),
-                );
-            }
-            let value = desired.value(key);
-            let changed = expected[i].value != value;
-            put(store, key, expected[i].clone(), value.clone(), &mut journal)?;
-            if changed {
-                // Do not adopt an external update observed after our readback.
-                expected[i] = Saved {
-                    user: Some(value.clone()),
-                    value,
-                };
+    Ok(())
+}
+
+fn apply_stores(store: &impl Store, desired: &[&Desired]) -> Result<(), String> {
+    // Validate the entire pair before touching either path. Only these checked
+    // actions may be excluded from conflict scans, permitting swaps of our keys.
+    for (i, d) in desired.iter().enumerate() {
+        if desired[..i]
+            .iter()
+            .any(|other| other.action == d.action || other.accelerator == d.accelerator)
+        {
+            return Err("Для записи и обработки нужны разные сочетания клавиш.".into());
+        }
+    }
+    let mut expected = Vec::new();
+    let initial_paths = paths(store)?;
+    for d in desired {
+        let initial = action_snapshot(store, d.action);
+        ownership(&initial, d)?;
+        for (key, old) in d.action.keys().into_iter().zip(&initial) {
+            if old.value != d.value(key) && !store.writable(key) {
+                return Err(format!(
+                    "Параметр GNOME {} недоступен для записи. Проверьте блокировки dconf, установленные администратором.",
+                    key.name()
+                ));
             }
         }
-        if own_snapshot(store) != expected {
+        if !initial_paths.iter().any(|p| p == d.action.path()) && !store.writable(Key::List) {
             return Err(
-                "Сочетание STT Simple было изменено другим процессом. Повторите сохранение настроек.".into(),
+                "Список пользовательских сочетаний GNOME заблокирован. Проверьте блокировки dconf, установленные администратором.".into(),
             );
         }
-        // Re-scan conflicts and merge the latest list, not the initial snapshot.
-        store.conflicts(desired.accelerator)?;
+        expected.push(initial);
+    }
+    for d in desired {
+        store.conflicts(d.accelerator, desired)?;
+    }
+    unchanged(store, desired, &expected)?;
+    let mut journal = Vec::new();
+    let result = (|| {
+        for (index, d) in desired.iter().enumerate() {
+            for (i, key) in d.action.keys().into_iter().enumerate() {
+                unchanged(store, desired, &expected)?;
+                let value = d.value(key);
+                let changed = expected[index][i].value != value;
+                put(
+                    store,
+                    key,
+                    expected[index][i].clone(),
+                    value.clone(),
+                    &mut journal,
+                )?;
+                if changed {
+                    // Do not adopt an external update observed after our readback.
+                    expected[index][i] = Saved {
+                        user: Some(value.clone()),
+                        value,
+                    };
+                }
+            }
+        }
+        unchanged(store, desired, &expected)?;
+        // Both metadata sets are ready before adding either path to the list.
+        for d in desired {
+            store.conflicts(d.accelerator, desired)?;
+        }
+        unchanged(store, desired, &expected)?;
         let before = store.read(Key::List);
         let mut current: Vec<String> = before
             .value
             .get()
             .ok_or("Список пользовательских сочетаний GNOME имеет неверный тип.")?;
-        if !current.iter().any(|p| p == PATH) {
-            current.push(PATH.into());
-            put(store, Key::List, before, current.to_variant(), &mut journal)?;
+        for d in desired {
+            if !current.iter().any(|p| p == d.action.path()) {
+                current.push(d.action.path().into());
+            }
         }
-        verify_store(store, desired)
+        put(store, Key::List, before, current.to_variant(), &mut journal)?;
+        for d in desired {
+            verify_store(store, d)?;
+        }
+        unchanged(store, desired, &expected)
     })();
     if let Err(error) = result {
         let rollback_errors = rollback(store, &journal);
         if rollback_errors.is_empty() {
             return Err(error);
         }
-        return Err(format!("{error} Не удалось полностью отменить изменения: {}. Проверьте запись STT Simple в настройках GNOME перед повторной попыткой.", rollback_errors.join("; ")));
+        return Err(format!("{error} Не удалось полностью отменить изменения: {}. Проверьте записи STT Simple в настройках GNOME перед повторной попыткой.", rollback_errors.join("; ")));
     }
     Ok(())
 }
@@ -492,14 +602,22 @@ fn rollback(store: &impl Store, journal: &[Change]) -> Vec<String> {
                 errors.push("исходный список сочетаний имеет неверный тип".into());
                 continue;
             };
-            if old.iter().any(|p| p == PATH) {
+            let Some(written) = change.written.get::<Vec<String>>() else {
+                errors.push("записанный список сочетаний имеет неверный тип".into());
                 continue;
+            };
+            // Remove only our appended paths; preserve unrelated concurrent entries,
+            // duplicates and ordering. Never restore a stale whole list.
+            let mut removed = false;
+            for path in [PATH, POLISH_PATH] {
+                if !old.iter().any(|p| p == path) && written.iter().any(|p| p == path) {
+                    if let Some(index) = list.iter().rposition(|p| p == path) {
+                        list.remove(index);
+                        removed = true;
+                    }
+                }
             }
-            // Remove only the path we appended; retain concurrent unrelated entries
-            // and ordering. Do not replace the list with its stale original value.
-            if let Some(index) = list.iter().rposition(|p| p == PATH) {
-                list.remove(index);
-            } else {
+            if !removed {
                 continue;
             }
             if list == old {
@@ -548,6 +666,7 @@ struct Gnome {
     source: gio::SettingsSchemaSource,
     media: gio::Settings,
     own: gio::Settings,
+    polish: gio::Settings,
     custom_schema: gio::SettingsSchema,
 }
 fn settings(schema: &gio::SettingsSchema, path: Option<&str>) -> gio::Settings {
@@ -583,15 +702,16 @@ impl Gnome {
         Ok(Self {
             media: settings(&media_schema, None),
             own: settings(&custom_schema, Some(PATH)),
+            polish: settings(&custom_schema, Some(POLISH_PATH)),
             source,
             custom_schema,
         })
     }
     fn target(&self, key: Key) -> &gio::Settings {
-        if key == Key::List {
-            &self.media
-        } else {
-            &self.own
+        match key {
+            Key::List => &self.media,
+            Key::Name | Key::Command | Key::Binding => &self.own,
+            Key::PolishName | Key::PolishCommand | Key::PolishBinding => &self.polish,
         }
     }
     fn scan(&self, schema: &gio::SettingsSchema, target: Accelerator) -> Result<(), String> {
@@ -643,9 +763,14 @@ impl Store for Gnome {
         gio::Settings::sync();
         Ok(())
     }
-    fn conflicts(&self, target: Accelerator) -> Result<(), String> {
+    fn conflicts(&self, target: Accelerator, owned: &[&Desired]) -> Result<(), String> {
+        // Never blindly ignore reserved paths: their metadata may be foreign or
+        // may have changed since preflight. Verification excludes only its action.
+        for d in owned {
+            ownership(&action_snapshot(self, d.action), d)?;
+        }
         for path in paths(self)? {
-            if path == PATH {
+            if owned.iter().any(|d| path == d.action.path()) {
                 continue;
             }
             // Validate before passing an untrusted path to GSettings (which can abort).
@@ -705,6 +830,11 @@ mod tests {
     use std::collections::HashMap;
 
     const COMMAND: &str = "\"/opt/STT Simple/stt-simple\" --toggle";
+    const POLISH_COMMAND: &str = "\"/opt/STT Simple/stt-simple\" --cycle-polish";
+
+    fn executable(command: &str) -> Result<String, String> {
+        action_executable(Action::Recording, command)
+    }
     struct Fake {
         values: RefCell<HashMap<Key, Saved>>,
         writes: RefCell<Vec<Key>>,
@@ -714,6 +844,9 @@ mod tests {
         bindings: RefCell<Vec<String>>,
         concurrent_list: bool,
         drop_write: Option<Key>,
+        default_list: Variant,
+        conflict_after: Option<Key>,
+        external_after: Option<(Key, Key, Variant)>,
     }
     impl Fake {
         fn new(list: &[&str]) -> Self {
@@ -729,7 +862,7 @@ mod tests {
                     user: None,
                 },
             );
-            for key in OWN_KEYS {
+            for key in OWN_KEYS.into_iter().chain(Action::Polish.keys()) {
                 values.insert(
                     key,
                     Saved {
@@ -739,6 +872,7 @@ mod tests {
                 );
             }
             Self {
+                default_list: values[&Key::List].value.clone(),
                 values: RefCell::new(values),
                 writes: RefCell::new(Vec::new()),
                 locked: vec![],
@@ -747,6 +881,8 @@ mod tests {
                 bindings: RefCell::new(vec![]),
                 concurrent_list: false,
                 drop_write: None,
+                conflict_after: None,
+                external_after: None,
             }
         }
         fn set(&self, key: Key, value: Variant) {
@@ -775,7 +911,7 @@ mod tests {
                 return Ok(());
             }
             let default = if key == Key::List {
-                Vec::<String>::new().to_variant()
+                self.default_list.clone()
             } else {
                 "".to_variant()
             };
@@ -798,12 +934,33 @@ mod tests {
                 self.set(Key::List, list.to_variant());
                 self.bindings.borrow_mut().push("<Super>r".into()); // failure after list write
             }
+            if self.conflict_after == Some(key) && value.is_some() {
+                self.bindings.borrow_mut().push("<Super>backslash".into());
+            }
+            if let Some((trigger, target, external)) = &self.external_after {
+                if *trigger == key && value.is_some() {
+                    self.set(*target, external.clone());
+                }
+            }
             if self.fail_after == Some(key) && value.is_some() {
                 return Err("injected failure after write".into());
             }
             Ok(())
         }
-        fn conflicts(&self, target: Accelerator) -> Result<(), String> {
+        fn conflicts(&self, target: Accelerator, owned: &[&Desired]) -> Result<(), String> {
+            for d in owned {
+                ownership(&action_snapshot(self, d.action), d)?;
+            }
+            for path in paths(self)? {
+                if !valid_path(&path) {
+                    return Err("invalid custom path".into());
+                }
+                for action in [Action::Recording, Action::Polish] {
+                    if path == action.path() && !owned.iter().any(|d| d.action == action) {
+                        conflict(text(&self.read(action.keys()[2]))?, target, &path)?;
+                    }
+                }
+            }
             for binding in self.bindings.borrow().iter() {
                 conflict(binding, target, "fake built-in/custom")?;
             }
@@ -812,6 +969,220 @@ mod tests {
     }
     fn desired() -> Desired {
         Desired::new("Super+R", COMMAND).unwrap()
+    }
+    fn polish() -> Desired {
+        Desired::for_action(Action::Polish, "Super+Backslash", POLISH_COMMAND).unwrap()
+    }
+
+    #[test]
+    fn polish_super_backslash_mapping_and_readonly_verification() {
+        let d = polish();
+        assert_eq!(d.binding, "<Super>backslash");
+        assert_eq!(d.accelerator, accelerator("<Mod4>backslash").unwrap());
+        let fake = Fake::new(&[]);
+        assert!(verify_store(&fake, &d).is_err());
+        assert!(fake.writes.borrow().is_empty());
+        apply_stores(&fake, &[&desired(), &d]).unwrap();
+        fake.writes.borrow_mut().clear();
+        verify_store(&fake, &d).unwrap();
+        assert!(fake.writes.borrow().is_empty());
+        assert_eq!(fake.read(Key::PolishName).value.str(), Some(POLISH_NAME));
+        assert_eq!(
+            fake.read(Key::PolishCommand).value.str(),
+            Some(POLISH_COMMAND)
+        );
+    }
+
+    #[test]
+    fn command_and_ownership_are_action_specific() {
+        assert!(Desired::for_action(Action::Recording, "Super+R", POLISH_COMMAND).is_err());
+        assert!(Desired::for_action(Action::Polish, "Super+Backslash", COMMAND).is_err());
+        for command in [
+            "stt-simple --cycle-polish",
+            "\"relative\" --cycle-polish",
+            "\"/bin/stt-simple\" --cycle-polish --extra",
+            "\"/bin/stt-simple\" --cycle-polish\n",
+        ] {
+            assert!(action_executable(Action::Polish, command).is_err());
+        }
+        for (action, wrong_command) in [
+            (Action::Recording, POLISH_COMMAND),
+            (Action::Polish, COMMAND),
+        ] {
+            let fake = Fake::new(&[PATH, POLISH_PATH]);
+            let keys = action.keys();
+            fake.set(keys[0], action.name().to_variant());
+            fake.set(keys[1], wrong_command.to_variant());
+            fake.set(keys[2], "<Super>r".to_variant());
+            let before = fake.values.borrow().clone();
+            assert!(apply_stores(&fake, &[&desired(), &polish()]).is_err());
+            assert_eq!(*fake.values.borrow(), before);
+            assert!(fake.writes.borrow().is_empty());
+        }
+    }
+
+    #[test]
+    fn pair_preserves_unrelated_paths_defaults_and_is_idempotent() {
+        let fake = Fake::new(&["/other/", "/other/", "/third/"]);
+        apply_stores(&fake, &[&desired(), &polish()]).unwrap();
+        assert_eq!(
+            paths(&fake).unwrap(),
+            ["/other/", "/other/", "/third/", PATH, POLISH_PATH]
+        );
+        let writes = fake.writes.borrow().len();
+        apply_stores(&fake, &[&desired(), &polish()]).unwrap();
+        assert_eq!(fake.writes.borrow().len(), writes);
+        verify_store(&fake, &desired()).unwrap();
+        verify_store(&fake, &polish()).unwrap();
+    }
+
+    #[test]
+    fn pair_preflights_second_conflict_and_locks_and_distinct_keys() {
+        let fake = Fake::new(&[]);
+        fake.bindings.borrow_mut().push("<Mod4>backslash".into());
+        assert!(apply_stores(&fake, &[&desired(), &polish()]).is_err());
+        assert!(fake.writes.borrow().is_empty());
+        for key in Action::Polish.keys() {
+            let mut fake = Fake::new(&[]);
+            fake.locked.push(key);
+            assert!(apply_stores(&fake, &[&desired(), &polish()]).is_err());
+            assert!(fake.writes.borrow().is_empty());
+        }
+        let fake = Fake::new(&[]);
+        let duplicate = Desired::for_action(Action::Polish, "super+KeyR", POLISH_COMMAND).unwrap();
+        assert!(apply_stores(&fake, &[&desired(), &duplicate]).is_err());
+        assert!(fake.writes.borrow().is_empty());
+    }
+
+    #[test]
+    fn pair_allows_owned_swaps_but_not_foreign_reserved_data() {
+        let fake = Fake::new(&[]);
+        apply_stores(&fake, &[&desired(), &polish()]).unwrap();
+        let recording = Desired::new("Super+Backslash", "\"/new/stt-simple\" --toggle").unwrap();
+        let cycle = Desired::for_action(
+            Action::Polish,
+            "Super+R",
+            "\"/new/stt-simple\" --cycle-polish",
+        )
+        .unwrap();
+        apply_stores(&fake, &[&recording, &cycle]).unwrap();
+        verify_store(&fake, &recording).unwrap();
+        verify_store(&fake, &cycle).unwrap();
+        for action in [Action::Recording, Action::Polish] {
+            for (name, command) in [
+                (
+                    "Other app",
+                    if action == Action::Recording {
+                        COMMAND
+                    } else {
+                        POLISH_COMMAND
+                    },
+                ),
+                (action.name(), "\"/bin/other\" --cycle-polish"),
+                ("", ""),
+            ] {
+                let fake = Fake::new(&[PATH, POLISH_PATH]);
+                fake.set(action.keys()[0], name.to_variant());
+                fake.set(action.keys()[1], command.to_variant());
+                fake.set(action.keys()[2], "<Super>backslash".to_variant());
+                assert!(apply_stores(&fake, &[&desired(), &polish()]).is_err());
+                assert!(fake.writes.borrow().is_empty());
+            }
+        }
+        // A single-action check must not exclude the other reserved path.
+        fake.set(Key::PolishBinding, recording.binding.to_variant());
+        assert!(verify_store(&fake, &recording)
+            .unwrap_err()
+            .contains("уже назначено"));
+    }
+
+    #[test]
+    fn pair_failures_restore_both_actions_and_list_user_defaults() {
+        for key in OWN_KEYS
+            .into_iter()
+            .chain(Action::Polish.keys())
+            .chain([Key::List])
+        {
+            let mut fake = Fake::new(&["/other/", "/other/"]);
+            let before = fake.values.borrow().clone();
+            fake.fail_after = Some(key);
+            assert!(apply_stores(&fake, &[&desired(), &polish()]).is_err());
+            assert_eq!(*fake.values.borrow(), before, "{key:?}");
+        }
+        for key in Action::Polish.keys() {
+            let mut fake = Fake::new(&["/other/"]);
+            fake.fail = Some(key);
+            let before = fake.values.borrow().clone();
+            assert!(apply_stores(&fake, &[&desired(), &polish()]).is_err());
+            assert_eq!(*fake.values.borrow(), before, "{key:?}");
+        }
+        let mut fake = Fake::new(&[]);
+        fake.drop_write = Some(Key::PolishBinding);
+        let before = fake.values.borrow().clone();
+        assert!(apply_stores(&fake, &[&desired(), &polish()]).is_err());
+        assert_eq!(*fake.values.borrow(), before);
+    }
+
+    #[test]
+    fn pair_list_rollback_removes_only_new_paths_and_restores_user_state() {
+        for initial in [["/other/", PATH], ["/other/", POLISH_PATH]] {
+            for explicit_user_list in [false, true] {
+                let mut fake = Fake::new(&initial);
+                if explicit_user_list {
+                    fake.set(Key::List, initial.map(str::to_owned).to_vec().to_variant());
+                }
+                let before = fake.values.borrow().clone();
+                fake.fail_after = Some(Key::List);
+                assert!(apply_stores(&fake, &[&desired(), &polish()]).is_err());
+                assert_eq!(*fake.values.borrow(), before);
+            }
+        }
+    }
+
+    #[test]
+    fn failed_pair_swap_restores_existing_user_values() {
+        let mut fake = Fake::new(&["/other/"]);
+        apply_stores(&fake, &[&desired(), &polish()]).unwrap();
+        let before = fake.values.borrow().clone();
+        fake.fail_after = Some(Key::PolishBinding);
+        let recording = Desired::new("Super+Backslash", COMMAND).unwrap();
+        let cycle = Desired::for_action(Action::Polish, "Super+R", POLISH_COMMAND).unwrap();
+        assert!(apply_stores(&fake, &[&recording, &cycle]).is_err());
+        assert_eq!(*fake.values.borrow(), before);
+    }
+
+    #[test]
+    fn pair_rolls_back_late_conflict_and_preserves_concurrent_list_entries() {
+        let mut fake = Fake::new(&["/other/"]);
+        fake.conflict_after = Some(Key::PolishBinding);
+        let before = fake.values.borrow().clone();
+        assert!(apply_stores(&fake, &[&desired(), &polish()]).is_err());
+        assert_eq!(*fake.values.borrow(), before);
+
+        let mut fake = Fake::new(&["/other/"]);
+        fake.concurrent_list = true;
+        assert!(apply_stores(&fake, &[&desired(), &polish()]).is_err());
+        assert_eq!(paths(&fake).unwrap(), ["/other/", "/concurrent/", "/late/"]);
+        for action in [Action::Recording, Action::Polish] {
+            assert!(action_snapshot(&fake, action)
+                .iter()
+                .all(|v| v.user.is_none()));
+        }
+    }
+
+    #[test]
+    fn pair_rollback_preserves_external_metadata_change() {
+        let mut fake = Fake::new(&[]);
+        fake.external_after = Some((Key::PolishBinding, Key::Name, "External".to_variant()));
+        let error = apply_stores(&fake, &[&desired(), &polish()]).unwrap_err();
+        assert!(error.contains("Не удалось полностью отменить"));
+        assert_eq!(fake.read(Key::Name).value.str(), Some("External"));
+        assert!(fake.read(Key::Command).user.is_none());
+        assert!(fake.read(Key::Binding).user.is_none());
+        assert!(action_snapshot(&fake, Action::Polish)
+            .iter()
+            .all(|v| v.user.is_none()));
+        assert!(paths(&fake).unwrap().is_empty());
     }
 
     #[test]

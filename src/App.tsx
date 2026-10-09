@@ -51,7 +51,7 @@ export default function App() {
     shortcut: '',
     model: DEFAULT_MODEL,
     tts_shortcut: '',
-    polish_shortcut: 'Control+Super+Backslash',
+    polish_shortcut: /Linux|X11/i.test(navigator.userAgent) ? 'Super+Backslash' : 'Control+Super+Backslash',
     tts_model: DEFAULT_TTS_MODEL,
     tts_voice: DEFAULT_TTS_VOICE,
     input_device: null,
@@ -359,7 +359,7 @@ export default function App() {
                   onChange={(event) => updateDraft('shortcut', event.target.value)} />
                 <p className="help" id="shortcut-help">Например, <kbd>{formatShortcutHint('Super+R', mac)}</kbd> или
                   <kbd>{formatShortcutHint('Control+Super+R', mac)}</kbd>. {systemHotkey
-                    ? 'После сохранения приложение создаст или обновит только сочетание диктовки в GNOME. Чужие сочетания не перезаписываются.'
+                    ? 'После сохранения приложение создаст или обновит сочетания диктовки и переключения обработки в GNOME. Чужие сочетания не перезаписываются.'
                     : 'После сохранения приложение зарегистрирует сочетание в системе.'}</p>
               </div>
               <div className="settings-subsection" aria-labelledby="tts-settings-heading">
@@ -412,7 +412,7 @@ export default function App() {
                     onChange={(event) => updateDraft('tts_shortcut', event.target.value)} />
                   <p className="help" id="tts-shortcut-help">Например, <kbd>{formatShortcutHint('Control+Super+A', mac)}</kbd>.
                     {systemHotkey
-                      ? ' На Wayland назначьте показанную ниже команду --toggle-tts вручную; автоматическая регистрация GNOME применяется только к диктовке.'
+                      ? ' На Wayland назначьте показанную ниже команду --toggle-tts вручную; автоматическая регистрация GNOME применяется к диктовке и переключению обработки.'
                       : ' После сохранения приложение зарегистрирует сочетание в системе.'}</p>
                 </div>
               </div>
@@ -452,10 +452,10 @@ export default function App() {
               <div className="field">
                 <label htmlFor="polish-shortcut">Сочетание клавиш переключения обработки</label>
                 <input id="polish-shortcut" value={draft.polish_shortcut} maxLength={128} spellCheck={false}
-                  placeholder="Control+Super+Backslash" autoComplete="off" aria-describedby="polish-shortcut-help"
+                  placeholder={linux ? 'Super+Backslash' : 'Control+Super+Backslash'} autoComplete="off" aria-describedby="polish-shortcut-help"
                   aria-invalid={Boolean(settingsError)}
                   onChange={(event) => updateDraft('polish_shortcut', event.target.value)} />
-                <p className="help" id="polish-shortcut-help">Например, <kbd>{formatShortcutHint('Control+Super+Backslash', mac).replace('Backslash', '\\')}</kbd>.
+                <p className="help" id="polish-shortcut-help">Например, <kbd>{formatShortcutHint(linux ? 'Super+Backslash' : 'Control+Super+Backslash', mac).replace('Backslash', '\\').replace('Super', linux ? 'Win' : 'Super')}</kbd>.
                   Переключает «Выключено» и избранные профили в порядке списка.</p>
               </div>
               <PolishSettingsFields key={`${keyGeneration}:${snapshot?.has_api_key}:${connected}`}
@@ -525,8 +525,8 @@ export default function App() {
           {snapshot.tts_hotkey_message && <p className="hotkey-message"><strong>Озвучивание:</strong> {snapshot.tts_hotkey_message}</p>}
           {snapshot.polish_hotkey_message && <p className="hotkey-message"><strong>Переключение обработки:</strong> {snapshot.polish_hotkey_message}</p>}
           {systemHotkey && <>
-            <p>На Ubuntu GNOME/Wayland нажмите «Сохранить настройки», чтобы применить выбранное
-              сочетание к системе. Команда для этой сборки:</p>
+            <p>На Ubuntu GNOME/Wayland нажмите «Сохранить настройки», чтобы применить выбранные
+              сочетания диктовки и переключения обработки к системе. Команда диктовки для этой сборки:</p>
             <code className="command">{snapshot.hotkey_command ?? 'stt-simple --toggle'}</code>
             <p className="help">Привязка проверяется при запуске и сохранении настроек. Если комбинация
               занята, выберите свободную или освободите её в «Настройки GNOME → Клавиатура →
@@ -538,11 +538,13 @@ export default function App() {
               <h3>Озвучивание на Wayland</h3>
               <p>Назначьте сочетание <kbd>{formatShortcutHint(snapshot.settings.tts_shortcut, mac)}</kbd> вручную на команду:</p>
               <code className="command">{snapshot.tts_hotkey_command ?? 'stt-simple --toggle-tts'}</code>
-              <p className="help">Автоматическая регистрация GNOME относится только к диктовке. TTS на Linux не проверен.</p>
+              <p className="help">Озвучивание назначается вручную; диктовка и переключение обработки настраиваются автоматически. TTS на Linux не проверен.</p>
             </div>
             <div className="wayland-tts">
               <h3>Переключение обработки на Wayland</h3>
-              <p>Назначьте сочетание <kbd>{formatShortcutHint(snapshot.settings.polish_shortcut, mac)}</kbd> вручную на команду:</p>
+              <p>Сочетание <kbd>{formatShortcutHint(snapshot.settings.polish_shortcut, mac).replace('Backslash', '\\').replace('Super', linux ? 'Win' : 'Super')}</kbd>
+                {snapshot.polish_hotkey_available ? ' · настроено в GNOME' : ' · не настроено в GNOME'}.
+                Нажмите «Сохранить настройки», чтобы создать или обновить привязку.</p>
               <code className="command">{snapshot.polish_hotkey_command ?? 'stt-simple --cycle-polish'}</code>
             </div>
           </>}

@@ -19,6 +19,11 @@ pub(crate) const MAX_AUDIO_BYTES: usize = 25 * 1024 * 1024;
 pub const DEFAULT_MODEL: &str = "gpt-transcribe";
 pub const DEFAULT_TTS_MODEL: &str = "gpt-4o-mini-tts";
 pub const DEFAULT_TTS_VOICE: &str = "marin";
+pub const DEFAULT_POLISH_SHORTCUT: &str = if cfg!(target_os = "linux") {
+    "Super+Backslash"
+} else {
+    "Control+Super+Backslash"
+};
 pub const MAX_TTS_INPUT_CHARS: usize = 4096;
 
 #[derive(Clone, Copy, Default, Serialize, Deserialize, Debug, PartialEq, Eq)]
@@ -55,7 +60,7 @@ impl Default for Settings {
             .to_owned(),
             model: DEFAULT_MODEL.to_owned(),
             tts_shortcut: "Control+Super+A".to_owned(),
-            polish_shortcut: "Control+Super+Backslash".to_owned(),
+            polish_shortcut: DEFAULT_POLISH_SHORTCUT.to_owned(),
             tts_model: DEFAULT_TTS_MODEL.to_owned(),
             tts_voice: DEFAULT_TTS_VOICE.to_owned(),
             input_device: None,
@@ -269,7 +274,15 @@ mod tests {
         assert_eq!(DEFAULT_TTS_VOICE, "marin");
         assert_eq!(MAX_TTS_INPUT_CHARS, 4096);
         assert_eq!(settings.tts_shortcut, "Control+Super+A");
-        assert_eq!(settings.polish_shortcut, "Control+Super+Backslash");
+        assert_eq!(settings.polish_shortcut, DEFAULT_POLISH_SHORTCUT);
+        assert_eq!(
+            DEFAULT_POLISH_SHORTCUT,
+            if cfg!(target_os = "linux") {
+                "Super+Backslash"
+            } else {
+                "Control+Super+Backslash"
+            }
+        );
         assert_eq!(settings.tts_model, DEFAULT_TTS_MODEL);
         assert_eq!(settings.tts_voice, DEFAULT_TTS_VOICE);
         assert_eq!(settings.input_device, None);
@@ -365,7 +378,7 @@ mod tests {
         let settings: Settings =
             serde_json::from_str(r#"{"shortcut":"Super+R","model":"whisper-1"}"#).unwrap();
         assert_eq!(settings.tts_shortcut, "Control+Super+A");
-        assert_eq!(settings.polish_shortcut, "Control+Super+Backslash");
+        assert_eq!(settings.polish_shortcut, DEFAULT_POLISH_SHORTCUT);
         assert_eq!(settings.tts_model, DEFAULT_TTS_MODEL);
         assert_eq!(settings.tts_voice, DEFAULT_TTS_VOICE);
         assert!(settings.polish.favorite_profile_ids.is_empty());

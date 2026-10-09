@@ -204,7 +204,22 @@ describe('polishing interface', () => {
     expect(backend.saveSettings).not.toHaveBeenCalled();
   });
 
-  it('shows the macOS cycle shortcut and locks it with favorite controls while busy', async () => {
+  it('shows the Linux cycle shortcut and its GNOME registration status', async () => {
+      vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (X11; Linux x86_64)');
+      const snapshot = makeSnapshot({ hotkey_mode: 'system', polish_hotkey_available: true });
+      snapshot.settings.polish_shortcut = 'Super+Backslash';
+      await mount(snapshot);
+      expect(screen.getByLabelText('Сочетание клавиш переключения обработки')).toHaveProperty('value', 'Super+Backslash');
+      expect(screen.getByLabelText('Сочетание клавиш переключения обработки')).toHaveProperty('placeholder', 'Super+Backslash');
+      const shortcut = screen.getAllByText('Win+\\', { selector: 'kbd' });
+      expect(shortcut).toHaveLength(2);
+      expect(shortcut[1]?.parentElement?.textContent).toContain('настроено в GNOME');
+      expect(shortcut[1]?.parentElement?.textContent).not.toContain('вручную');
+      emit({ ...snapshot, polish_hotkey_available: false });
+      expect(screen.getAllByText('Win+\\', { selector: 'kbd' })[1]?.parentElement?.textContent).toContain('не настроено в GNOME');
+    });
+
+    it('shows the macOS cycle shortcut and locks it with favorite controls while busy', async () => {
     vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(
       'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/605.1.15',
     );
@@ -747,7 +762,7 @@ describe('Russian dictation interface', () => {
     expect(screen.getByText(command)).toBeTruthy();
     expect(screen.getByText(ttsCommand)).toBeTruthy();
     expect(screen.getAllByText(/TTS на Linux не проверен/)).toHaveLength(2);
-    expect(screen.getByText(/автоматическая регистрация GNOME применяется только к диктовке/i)).toBeTruthy();
+    expect(screen.getByText(/автоматическая регистрация GNOME применяется к диктовке и переключению обработки/i)).toBeTruthy();
     expect(screen.getByText(/не настроено в GNOME/)).toBeTruthy();
     expect(screen.queryByText(/недоступно, используйте кнопку/)).toBeNull();
     expect(screen.queryByText(/не удалось зарегистрировать/)).toBeNull();
@@ -764,7 +779,7 @@ describe('Russian dictation interface', () => {
     fireEvent.click(save);
     await screen.findByText('Настройки сохранены.');
     expect(backend.saveSettings).toHaveBeenCalledWith(saved.settings);
-    expect(screen.getByText(/· настроено в GNOME/)).toBeTruthy();
+    expect(screen.getByText(/· настроено в GNOME/, { selector: '.shortcut-hint span' })).toBeTruthy();
   });
 
   it('does not show Wayland instructions on Linux with native shortcut registration', async () => {
@@ -782,7 +797,7 @@ describe('Russian dictation interface', () => {
       fireEvent.change(screen.getByLabelText('Сочетание клавиш'), { target: { value: 'Super+E' } });
       fireEvent.click(screen.getByRole('button', { name: 'Сохранить настройки' }));
       await screen.findByText(/Не удалось сохранить настройки: Сочетание уже назначено/);
-      expect(screen.getByText(/· настроено в GNOME/)).toBeTruthy();
+      expect(screen.getByText(/· настроено в GNOME/, { selector: '.shortcut-hint span' })).toBeTruthy();
       expect(screen.getByText('Super+R', { selector: '.shortcut-hint kbd' })).toBeTruthy();
       expect(screen.getByLabelText('Сочетание клавиш')).toHaveProperty('value', 'Super+E');
     });
