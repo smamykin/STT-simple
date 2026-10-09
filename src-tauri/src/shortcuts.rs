@@ -66,16 +66,33 @@ pub fn wayland_polish_command() -> String {
         .unwrap_or_else(|| "stt-simple --cycle-polish".into())
 }
 
+fn verify_system_polish(shortcut: &str) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        crate::gnome_shortcuts::verify_polish(shortcut, &wayland_polish_command())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = shortcut;
+        Err("Автоматическая настройка GNOME поддерживается только на Linux.".into())
+    }
+}
+
 pub fn update_tts_status(app: &AppHandle) {
     let runtime = app.state::<Runtime>();
+    let polish_status = if clipboard::is_wayland() {
+        verify_system_polish(&runtime.snapshot().settings.polish_shortcut)
+    } else {
+        Ok(())
+    };
     let mut data = runtime.data.lock().expect("application state poisoned");
     if clipboard::is_wayland() {
         data.tts_hotkey_available = false;
         data.tts_hotkey_command = Some(wayland_tts_command());
         data.tts_hotkey_message = Some("Назначьте команду озвучивания вручную в системных сочетаниях клавиш. TTS на Linux не проверен.".into());
-        data.polish_hotkey_available = false;
+        data.polish_hotkey_available = polish_status.is_ok();
         data.polish_hotkey_command = Some(wayland_polish_command());
-        data.polish_hotkey_message = Some("Назначьте команду переключения профиля обработки вручную в системных сочетаниях клавиш. Переключение профиля на Linux не проверено.".into());
+        data.polish_hotkey_message = polish_status.err();
     } else {
         data.tts_hotkey_available = true;
         data.tts_hotkey_command = None;
@@ -199,8 +216,17 @@ pub async fn replace(app: &AppHandle, old: &Settings, new: &Settings) -> Result<
         {
             let shortcut = new.shortcut.clone();
             let command = wayland_command();
-            return crate::blocking(move || crate::gnome_shortcuts::apply(&shortcut, &command))
-                .await;
+            let polish_shortcut = new.polish_shortcut.clone();
+            let polish_command = wayland_polish_command();
+            return crate::blocking(move || {
+                crate::gnome_shortcuts::apply_recording_and_polish(
+                    &shortcut,
+                    &command,
+                    &polish_shortcut,
+                    &polish_command,
+                )
+            })
+            .await;
         }
         #[cfg(not(target_os = "linux"))]
         return Err("Автоматическая настройка GNOME поддерживается только на Linux.".into());
