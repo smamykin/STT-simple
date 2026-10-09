@@ -1,4 +1,4 @@
-use crate::{shortcuts_are_equivalent, StoredData};
+use crate::{shortcuts_are_equivalent, StoredData, DEFAULT_POLISH_SHORTCUT};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -30,7 +30,7 @@ pub fn load_data(path: &Path) -> Result<StoredData, String> {
     if !has_polish_shortcut {
         // Only two older actions can occupy these three valid, ordered candidates.
         data.settings.polish_shortcut = [
-            "Control+Super+Backslash",
+            DEFAULT_POLISH_SHORTCUT,
             "Control+Super+5",
             "Control+Super+6",
         ]
@@ -199,7 +199,7 @@ mod tests {
         let mut data = load_data(&path).unwrap();
         assert_eq!(data.settings.polish, crate::PolishSettings::default());
         assert!(data.settings.polish.favorite_profile_ids.is_empty());
-        assert_eq!(data.settings.polish_shortcut, "Control+Super+Backslash");
+        assert_eq!(data.settings.polish_shortcut, DEFAULT_POLISH_SHORTCUT);
         assert_eq!(data.settings.model, "whisper-1");
         assert!(data.settings.auto_paste);
         data.settings.polish = crate::PolishSettings {
@@ -322,13 +322,17 @@ mod tests {
         let directory = TestDirectory::new();
         let path = directory.0.join("settings.json");
         for (stt, tts, expected) in [
-            ("Cmd+Ctrl+Backslash", "Control+Super+A", "Control+Super+5"),
-            ("Super+R", "Super+Control+Backslash", "Control+Super+5"),
-            ("cTrL+cMd+Backslash", "super+ctrl+5", "Control+Super+6"),
+            (
+                DEFAULT_POLISH_SHORTCUT,
+                "Control+Super+A",
+                "Control+Super+5",
+            ),
+            ("Super+R", DEFAULT_POLISH_SHORTCUT, "Control+Super+5"),
+            (DEFAULT_POLISH_SHORTCUT, "super+ctrl+5", "Control+Super+6"),
             (
                 "super+ctrl+5",
                 "option+command+Backslash",
-                "Control+Super+Backslash",
+                DEFAULT_POLISH_SHORTCUT,
             ),
         ] {
             let json = serde_json::json!({ "settings": { "shortcut": stt, "tts_shortcut": tts } });
@@ -347,7 +351,7 @@ mod tests {
         let loaded = load_data(&path).unwrap();
         assert_eq!(loaded.settings.shortcut, "cMd+cTrL+a");
         assert_eq!(loaded.settings.tts_shortcut, "Control+Super+4");
-        assert_eq!(loaded.settings.polish_shortcut, "Control+Super+Backslash");
+        assert_eq!(loaded.settings.polish_shortcut, DEFAULT_POLISH_SHORTCUT);
     }
 
     #[test]

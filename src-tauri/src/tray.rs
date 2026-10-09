@@ -6,6 +6,7 @@ use tauri::{AppHandle, Emitter, Manager, Wry};
 
 pub struct Controls {
     status: MenuItem<Wry>,
+    profile: MenuItem<Wry>,
     toggle: MenuItem<Wry>,
     speech: MenuItem<Wry>,
     cancel: MenuItem<Wry>,
@@ -24,6 +25,7 @@ pub fn show_window(app: &AppHandle) {
 
 pub fn initialize(app: &AppHandle) -> tauri::Result<()> {
     let status = MenuItem::with_id(app, "status", "Готово к записи", false, None::<&str>)?;
+    let profile = MenuItem::with_id(app, "profile", "Обработка: Выключено", false, None::<&str>)?;
     let toggle = MenuItem::with_id(app, "toggle", "Начать запись", true, None::<&str>)?;
     let speech = MenuItem::with_id(app, "speech", "Озвучить буфер", false, None::<&str>)?;
     let cancel = MenuItem::with_id(app, "cancel", "Отменить запись", false, None::<&str>)?;
@@ -38,12 +40,14 @@ pub fn initialize(app: &AppHandle) -> tauri::Result<()> {
     let quit = MenuItem::with_id(app, "quit", "Выход", true, None::<&str>)?;
     let menu = Menu::with_items(
         app,
-        &[&status, &toggle, &speech, &cancel, &copy, &settings, &quit],
+        &[
+            &status, &profile, &toggle, &speech, &cancel, &copy, &settings, &quit,
+        ],
     )?;
     let builder = TrayIconBuilder::with_id("status");
     #[cfg(target_os = "linux")]
     let builder = builder.temp_dir_path(create_icon_dir()?);
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let builder = builder.title("Off");
     builder
         .icon(icon(Phase::Idle))
@@ -63,6 +67,7 @@ pub fn initialize(app: &AppHandle) -> tauri::Result<()> {
         .build(app)?;
     app.manage(Controls {
         status,
+        profile,
         toggle,
         speech,
         cancel,
@@ -129,6 +134,7 @@ fn selected_profile_name(polish: &stt_core::PolishSettings) -> Option<String> {
         .map(|profile| profile.name)
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 fn mode_title(polish: &stt_core::PolishSettings) -> String {
     match polish.profile_id.as_deref() {
         None => "Off".into(),
@@ -189,13 +195,16 @@ fn refresh(app: &AppHandle, snapshot: &Snapshot) {
         }
         #[cfg(not(target_os = "linux"))]
         let _ = tray.set_icon(Some(icon(snapshot.phase)));
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         let _ = tray.set_title(Some(mode_title(&snapshot.settings.polish)));
         let profile =
             selected_profile_name(&snapshot.settings.polish).unwrap_or_else(|| "Выключено".into());
         let _ = tray.set_tooltip(Some(format!("STT Simple — {label} — обработка: {profile}")));
     }
     if let Some(controls) = app.try_state::<Controls>() {
+        let profile =
+            selected_profile_name(&snapshot.settings.polish).unwrap_or_else(|| "Выключено".into());
+        let _ = controls.profile.set_text(format!("Обработка: {profile}"));
         let speaking = matches!(snapshot.phase, Phase::Synthesizing | Phase::Playing);
         let _ = controls.speech.set_text(if speaking {
             "Остановить озвучивание"
