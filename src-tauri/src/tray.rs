@@ -322,6 +322,7 @@ mod tests {
             id: "custom-long".into(),
             name: "Очень длинный профиль".into(),
             instruction: "Test".into(),
+            ..Default::default()
         });
         polish.profile_id = Some("custom-long".into());
         assert_eq!(mode_title(&polish), "Очень длинн…");

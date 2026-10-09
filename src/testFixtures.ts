@@ -20,9 +20,9 @@ export function makeSnapshot(overrides: Partial<Snapshot> = {}): Snapshot {
     last_raw_transcript: null,
     can_retry_polish: false,
     builtin_polish_profiles: [
-      { id: 'polish', name: 'Минимальная правка', instruction: 'Минимально исправь текст, сохраняя смысл.' },
-      { id: 'markdown', name: 'Markdown', instruction: 'Структурируй текст в Markdown.' },
-      { id: 'developer', name: 'Сообщение разработчика', instruction: 'Оформи сообщение для мессенджера, сохраняя технические детали.' },
+      { id: 'polish', name: 'Минимальная правка', mode: 'llm', instruction: 'Минимально исправь текст, сохраняя смысл.', prefix: '', suffix: '' },
+      { id: 'markdown', name: 'Markdown', mode: 'llm', instruction: 'Структурируй текст в Markdown.', prefix: '', suffix: '' },
+      { id: 'developer', name: 'Сообщение разработчика', mode: 'llm', instruction: 'Оформи сообщение для мессенджера, сохраняя технические детали.', prefix: '', suffix: '' },
     ],
     last_error: null,
     has_api_key: true,

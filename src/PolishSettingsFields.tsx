@@ -47,17 +47,25 @@ export function PolishSettingsFields({ value, builtins, hasApiKey, onChange }: {
 
   function addProfile(source?: PolishProfile) {
     if (atProfileLimit) return;
-    const profile = {
+    const profile: PolishProfile = {
       id: createPolishProfileId(profiles),
       name: source ? `${[...source.name].slice(0, 72).join('')} — копия` : 'Новый профиль',
+      mode: source?.mode ?? 'llm',
       instruction: source?.instruction ?? '',
+      prefix: source?.prefix ?? '',
+      suffix: source?.suffix ?? '',
     };
     onChange({ ...value, profile_id: profile.id, custom_profiles: [...value.custom_profiles, profile] });
   }
 
-  function editProfile(field: 'name' | 'instruction', text: string) {
+  function editProfile(field: 'name' | 'instruction' | 'prefix' | 'suffix', text: string) {
     onChange({ ...value, custom_profiles: value.custom_profiles.map((profile) =>
       profile.id === custom?.id ? { ...profile, [field]: text } : profile) });
+  }
+
+  function editProfileMode(mode: PolishProfile['mode']) {
+    onChange({ ...value, custom_profiles: value.custom_profiles.map((profile) =>
+      profile.id === custom?.id ? { ...profile, mode } : profile) });
   }
 
   function toggleFavorite(id: string, checked: boolean) {
@@ -72,8 +80,8 @@ export function PolishSettingsFields({ value, builtins, hasApiKey, onChange }: {
   return (
     <section aria-labelledby="polish-heading">
       <div className="section-heading"><h2 id="polish-heading">Обработка текста</h2></div>
-      <p className="section-description">После распознавания текст и инструкция отправляются в OpenAI:
-        это дополнительный платный запрос. По умолчанию обработка выключена.
+      <p className="section-description">Профиль может обработать распознанный текст через OpenAI — это дополнительный платный запрос —
+        или локально добавить фиксированный префикс и суффикс без дополнительного запроса. По умолчанию обработка выключена.
         Настройки применяются к новым записям, а не к последнему результату.</p>
       <div className="field">
         <label htmlFor="polish-profile">Профиль обработки текста</label>
@@ -103,13 +111,32 @@ export function PolishSettingsFields({ value, builtins, hasApiKey, onChange }: {
         <p className="help" id="favorite-profiles-help">«Выключено» всегда участвует в цикле. Один избранный профиль превращает переключение в тумблер между ним и «Выключено».</p>
       </fieldset>
       {selected && <div className="field">
-        {custom && <>
+        {custom ? <>
           <label htmlFor="polish-name">Название профиля</label>
           <input id="polish-name" value={custom.name} onChange={(event) => editProfile('name', event.target.value)} />
+          <label htmlFor="polish-mode">Способ обработки</label>
+          <select id="polish-mode" value={custom.mode}
+            onChange={(event) => editProfileMode(event.target.value as PolishProfile['mode'])}>
+            <option value="llm">Обработать через OpenAI</option>
+            <option value="local">Только добавить префикс и суффикс</option>
+          </select>
+        </> : <p className="help">Способ обработки: дополнительный запрос к OpenAI.</p>}
+        {selected.mode === 'llm' && <>
+          <label htmlFor="polish-instruction">Инструкция профиля</label>
+          <textarea id="polish-instruction" className="transcript" rows={5} value={selected.instruction}
+            readOnly={!custom} maxLength={8000} onChange={(event) => editProfile('instruction', event.target.value)} />
         </>}
-        <label htmlFor="polish-instruction">Инструкция профиля</label>
-        <textarea id="polish-instruction" className="transcript" rows={5} value={selected.instruction}
-          readOnly={!custom} onChange={(event) => editProfile('instruction', event.target.value)} />
+        {custom && <>
+          <label htmlFor="polish-prefix">Префикс</label>
+          <textarea id="polish-prefix" className="transcript" rows={3} value={custom.prefix} maxLength={8000}
+            onChange={(event) => editProfile('prefix', event.target.value)} />
+          <label htmlFor="polish-suffix">Суффикс</label>
+          <textarea id="polish-suffix" className="transcript" rows={3} value={custom.suffix} maxLength={8000}
+            onChange={(event) => editProfile('suffix', event.target.value)} />
+          <p className="help">Пробелы и переносы строк сохраняются буквально. Префикс и суффикс добавляются последними:
+            к сырой расшифровке в локальном профиле или к успешному результату OpenAI.</p>
+          {custom.mode === 'local' && <p className="help">Локальный профиль не отправляет текст на дополнительную обработку OpenAI.</p>}
+        </>}
       </div>}
       <div className="field form-actions">
         <button type="button" className="button button-secondary button-small" disabled={atProfileLimit} onClick={() => addProfile()}>Создать профиль</button>
@@ -166,8 +193,8 @@ export function PolishSettingsFields({ value, builtins, hasApiKey, onChange }: {
           Доступность уровней зависит от модели. «По умолчанию» не передаёт
           параметр в OpenAI; «none» передаётся явно и не равнозначен значению по умолчанию.</p>
       </div>
-      <p className="help field">До 32 пользовательских профилей, название — до 80 символов, инструкция — до 8000.
-              Создание, изменение и удаление профилей применяются кнопкой «Сохранить настройки».</p>
+      <p className="help field">До 32 пользовательских профилей; название — до 80 символов, инструкция, префикс
+              и суффикс — до 8000 каждый. Создание, изменение и удаление профилей применяются кнопкой «Сохранить настройки».</p>
     </section>
   );
 }

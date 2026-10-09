@@ -1,9 +1,14 @@
 export type Phase = 'idle' | 'synthesizing' | 'playing' | 'recording' | 'transcribing' | 'polishing';
 
+export type PolishMode = 'llm' | 'local';
+
 export interface PolishProfile {
   id: string;
   name: string;
+  mode: PolishMode;
   instruction: string;
+  prefix: string;
+  suffix: string;
 }
 
 export interface PolishSettings {

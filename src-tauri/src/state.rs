@@ -3,7 +3,9 @@ use serde::Serialize;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use stt_core::{OpenAiClient, PolishProfile, PolishSettings, Settings, Statistics, StoredData};
+use stt_core::{
+    OpenAiClient, PolishMode, PolishProfile, PolishSettings, Settings, Statistics, StoredData,
+};
 use tauri_plugin_global_shortcut::Shortcut;
 use zeroize::Zeroizing;
 
@@ -270,17 +272,23 @@ impl Data {
         &mut self,
         raw: String,
         polish: PolishSettings,
-    ) -> Result<bool, String> {
-        self.last_raw_transcript = Some(raw);
+    ) -> Result<TranscriptProcessing, String> {
+        self.last_raw_transcript = Some(raw.clone());
         self.last_transcript = None;
         self.pending_polish = None;
         if polish.profile_id.is_none() {
-            return Ok(false);
+            return Ok(TranscriptProcessing::Publish(raw));
         }
         self.pending_polish = Some(polish.clone());
+        let profile = polish
+            .selected_profile()?
+            .expect("a selected profile id must resolve after validation");
+        if profile.mode == PolishMode::Local {
+            self.pending_polish = None;
+            return Ok(TranscriptProcessing::Publish(profile.apply_affixes(&raw)));
+        }
         self.phase = Phase::Polishing;
-        polish.selected_profile()?;
-        Ok(true)
+        Ok(TranscriptProcessing::Polish)
     }
 
     pub fn retry_job(&self) -> Result<(String, PolishSettings), String> {
@@ -321,6 +329,12 @@ impl Data {
             Err("Сначала завершите запись, распознавание, обработку текста или озвучивание.".into())
         }
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum TranscriptProcessing {
+    Publish(String),
+    Polish,
 }
 
 pub struct Runtime {
@@ -575,17 +589,36 @@ mod tests {
                 id: "custom-test".into(),
                 name: "Test".into(),
                 instruction: "Preserve all details.".into(),
+                suffix: "\n[после LLM]".into(),
+                ..Default::default()
             }],
             favorite_profile_ids: Vec::new(),
+        }
+    }
+
+    fn selected_local() -> PolishSettings {
+        PolishSettings {
+            profile_id: Some("local-test".into()),
+            custom_profiles: vec![PolishProfile {
+                id: "local-test".into(),
+                name: "Голосовая диктовка".into(),
+                mode: stt_core::PolishMode::Local,
+                instruction: String::new(),
+                prefix: "[голос]\n".into(),
+                suffix: "\n[проверь распознавание]".into(),
+            }],
+            ..Default::default()
         }
     }
 
     fn failed_polish() -> Data {
         let mut data = idle_data();
         data.phase = Phase::Transcribing;
-        assert!(data
-            .accept_transcript("raw".into(), selected_polish())
-            .unwrap());
+        assert_eq!(
+            data.accept_transcript("raw".into(), selected_polish())
+                .unwrap(),
+            TranscriptProcessing::Polish
+        );
         data.phase = Phase::Idle;
         data.last_error = Some("polish failed".into());
         data
@@ -682,13 +715,30 @@ mod tests {
     }
 
     #[test]
+    fn local_profile_publishes_affixed_raw_without_polishing_or_retry() {
+        let mut data = idle_data();
+        data.phase = Phase::Transcribing;
+        assert_eq!(
+            data.accept_transcript("сырой текст".into(), selected_local())
+                .unwrap(),
+            TranscriptProcessing::Publish("[голос]\nсырой текст\n[проверь распознавание]".into())
+        );
+        assert!(data.phase == Phase::Transcribing);
+        assert!(data.pending_polish.is_none());
+        assert_eq!(data.last_raw_transcript.as_deref(), Some("сырой текст"));
+        assert!(!data.snapshot().can_retry_polish);
+    }
+
+    #[test]
     fn disabled_polish_keeps_raw_and_only_publishes_successful_output() {
         let mut data = idle_data();
         data.phase = Phase::Transcribing;
         data.last_transcript = Some("old output".into());
-        assert!(!data
-            .accept_transcript("raw".into(), PolishSettings::default())
-            .unwrap());
+        assert_eq!(
+            data.accept_transcript("raw".into(), PolishSettings::default())
+                .unwrap(),
+            TranscriptProcessing::Publish("raw".into())
+        );
         assert!(data.last_transcript.is_none());
         assert_eq!(data.last_raw_transcript.as_deref(), Some("raw"));
         data.accept_output("raw".into());
@@ -701,9 +751,11 @@ mod tests {
     fn selected_polish_clears_stale_output_and_blocks_commands_until_completion() {
         let mut data = idle_data();
         data.last_transcript = Some("old output".into());
-        assert!(data
-            .accept_transcript("raw".into(), selected_polish())
-            .unwrap());
+        assert_eq!(
+            data.accept_transcript("raw".into(), selected_polish())
+                .unwrap(),
+            TranscriptProcessing::Polish
+        );
         assert!(data.phase == Phase::Polishing);
         assert!(data.last_transcript.is_none());
         assert!(data.ensure_idle().is_err());

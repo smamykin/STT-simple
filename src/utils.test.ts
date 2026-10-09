@@ -199,7 +199,7 @@ describe('settings validation', () => {
 });
 
 describe('polishing settings and retry guards', () => {
-  const profile = { id: 'custom-example', name: 'Профиль', instruction: 'Инструкция' };
+  const profile = { id: 'custom-example', name: 'Профиль', mode: 'llm' as const, instruction: 'Инструкция', prefix: '', suffix: '' };
   const withProfile: Settings = { ...settings, polish: { ...settings.polish, profile_id: profile.id, custom_profiles: [profile] } };
 
   it('normalizes model, profile name and instruction without mutating the input', () => {
@@ -210,6 +210,30 @@ describe('polishing settings and retry guards', () => {
     expect(input.polish.custom_profiles[0]?.name).toBe(' Имя ');
   });
 
+  it('preserves affix whitespace and validates local profiles without an LLM instruction', () => {
+    const local = {
+      ...profile,
+      mode: 'local' as const,
+      instruction: '',
+      prefix: 'Диктовка:\n\n',
+      suffix: '\n\nПроверь возможные ошибки распознавания.',
+    };
+    const input: Settings = {
+      ...settings,
+      polish: { ...settings.polish, profile_id: local.id, custom_profiles: [local] },
+    };
+    expect(normalizeSettings(input).polish.custom_profiles[0]).toMatchObject({
+      instruction: '',
+      prefix: 'Диктовка:\n\n',
+      suffix: '\n\nПроверь возможные ошибки распознавания.',
+    });
+    expect(validateSettings(input)).toBeNull();
+    expect(validateSettings({
+      ...input,
+      polish: { ...input.polish, custom_profiles: [{ ...local, prefix: ' \n', suffix: '' }] },
+    })).toContain('префикс или суффикс');
+  });
+
   it('compares every polishing field by value, including changes within profiles', () => {
     expect(settingsEqual(withProfile, structuredClone(withProfile))).toBe(true);
     for (const polish of [
@@ -218,7 +242,10 @@ describe('polishing settings and retry guards', () => {
       { ...withProfile.polish, effort: 'none' },
       { ...withProfile.polish, custom_profiles: [] },
       { ...withProfile.polish, favorite_profile_ids: [profile.id] },
-      ...['id', 'name', 'instruction'].map((field) => ({ ...withProfile.polish, custom_profiles: [{ ...profile, [field]: 'different' }] })),
+      ...['id', 'name', 'instruction', 'mode', 'prefix', 'suffix'].map((field) => ({
+        ...withProfile.polish,
+        custom_profiles: [{ ...profile, [field]: field === 'mode' ? 'local' : 'different' }],
+      })),
     ]) expect(settingsEqual(withProfile, { ...withProfile, polish })).toBe(false);
   });
 
@@ -257,7 +284,7 @@ describe('polishing settings and retry guards', () => {
     expect(validateSettings({ ...withProfile, polish: { ...withProfile.polish, favorite_profile_ids: [profile.id, profile.id] } })).toContain('не должны повторяться');
     expect(validateSettings({ ...settings, polish: { ...settings.polish, favorite_profile_ids: ['missing'] } })).toContain('не найден');
     expect(validateSettings({ ...settings, polish: { ...settings.polish, custom_profiles: [
-      { id: 'custom.v2:test', name: '😀'.repeat(80), instruction: '😀'.repeat(8000) },
+      { id: 'custom.v2:test', name: '😀'.repeat(80), mode: 'llm', instruction: '😀'.repeat(8000), prefix: '', suffix: '' },
     ] } })).toBeNull();
     for (const effort of [null, 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']) {
       expect(validateSettings({ ...settings, polish: { ...settings.polish, effort } })).toBeNull();

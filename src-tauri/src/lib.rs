@@ -9,7 +9,9 @@ mod shortcuts;
 mod state;
 mod tray;
 
-use state::{Data, HotkeyMode, Phase, Runtime, Session, Snapshot, TtsSession};
+use state::{
+    Data, HotkeyMode, Phase, Runtime, Session, Snapshot, TranscriptProcessing, TtsSession,
+};
 use std::collections::HashSet;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -446,14 +448,14 @@ async fn toggle(
                     };
                     tray::publish(app);
                     match selected {
-                        Some(Ok(true)) => {
+                        Some(Ok(TranscriptProcessing::Polish)) => {
                             cancellable(
                                 &mut cancellation,
                                 runtime.client.polish(&api_key, &polish, &raw),
                             )
                             .await
                         }
-                        Some(Ok(false)) => Some(Ok(raw)),
+                        Some(Ok(TranscriptProcessing::Publish(text))) => Some(Ok(text)),
                         Some(Err(error)) => Some(Err(error)),
                         None => None,
                     }
