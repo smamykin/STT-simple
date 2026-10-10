@@ -21,6 +21,7 @@ describe('Tauri command contract', () => {
       [backend.cancelRecording, 'cancel_recording'],
       [backend.resetStatistics, 'reset_statistics'],
       [backend.copyLastTranscript, 'copy_last_transcript'],
+      [backend.copyLastRawTranscript, 'copy_last_raw_transcript'],
       [backend.retryPolish, 'retry_polish'],
       [backend.cyclePolishProfile, 'cycle_polish_profile'],
       [backend.quitApp, 'quit_app'],
@@ -29,6 +30,17 @@ describe('Tauri command contract', () => {
       await command();
       expect(invoke).toHaveBeenLastCalledWith(name);
     }
+  });
+
+  it('copies raw text without sending text or invoking other commands and propagates native errors', async () => {
+    vi.mocked(invoke).mockResolvedValue(undefined);
+    await expect(backend.copyLastRawTranscript()).resolves.toBeUndefined();
+    expect(invoke).toHaveBeenCalledExactlyOnceWith('copy_last_raw_transcript');
+
+    vi.mocked(invoke).mockClear();
+    vi.mocked(invoke).mockRejectedValue('Буфер обмена недоступен');
+    await expect(backend.copyLastRawTranscript()).rejects.toBe('Буфер обмена недоступен');
+    expect(invoke).toHaveBeenCalledExactlyOnceWith('copy_last_raw_transcript');
   });
 
   it('passes settings and apiKey using the backend argument names', async () => {
@@ -48,7 +60,10 @@ describe('Tauri command contract', () => {
     expect(await backend.subscribe(onSnapshot)).toBe(cleanup);
     expect(listen).toHaveBeenCalledWith('app-state', expect.any(Function));
     const callback = vi.mocked(listen).mock.calls[0]?.[1];
-    const payload = makeSnapshot({ phase: 'recording' });
+    const payload = makeSnapshot({
+      phase: 'synthesizing', previous_transcript: 'A', last_raw_transcript: 'B',
+      has_pending_polish: true, can_retry_polish: false,
+    });
     callback?.({ event: 'app-state', id: 1, payload });
     expect(onSnapshot).toHaveBeenCalledExactlyOnceWith(payload);
   });

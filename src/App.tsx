@@ -4,6 +4,7 @@ import { backend, inTauri } from './backend';
 import type { Settings } from './types';
 import { useAppState } from './useAppState';
 import { PolishSettingsFields } from './PolishSettingsFields';
+import { TranscriptResult } from './TranscriptResult';
 import {
   DEFAULT_MODEL, DEFAULT_TTS_MODEL, DEFAULT_TTS_VOICE, MODELS, TTS_MODELS, TTS_VOICES,
   canRunAction, formatDuration, formatShortcutHint, isBusy, normalizeSettings, settingsEqual, statusText,
@@ -68,6 +69,19 @@ export default function App() {
   const [keyError, setKeyError] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [confirmReset, setConfirmReset] = useState(false);
+  const [page, setPage] = useState<'home' | 'settings'>('home');
+  const pageHeading = useRef<HTMLHeadingElement>(null);
+  const navigationButton = useRef<HTMLButtonElement>(null);
+
+  function navigate(next: 'home' | 'settings') {
+    setPage(next);
+    window.scrollTo?.({ top: 0 });
+  }
+
+  useEffect(() => {
+    if (page === 'settings') pageHeading.current?.focus();
+    else navigationButton.current?.focus();
+  }, [page]);
 
   const dirtyDraft = useRef(false);
   const profileEdited = useRef(false);
@@ -119,6 +133,11 @@ export default function App() {
   const customTtsVoice = manualTtsVoice || !TTS_VOICES.some((voice) => voice.value === draft.tts_voice);
   const toggleDisabled = !connected || pending !== null || !canRunAction('toggle_recording', snapshot);
   const speechDisabled = !connected || pending !== null || !canRunAction('toggle_speech', snapshot);
+  const activeMicrophone = snapshot?.settings.input_device
+    ? devices.find((device) => device.id === snapshot.settings.input_device)?.name ?? 'Сохранённый микрофон (недоступен)'
+    : 'Системный по умолчанию';
+  const activeProfile = [...(snapshot?.builtin_polish_profiles ?? []), ...(snapshot?.settings.polish.custom_profiles ?? [])]
+    .find((profile) => profile.id === snapshot?.settings.polish.profile_id);
 
   async function saveSettings(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -169,10 +188,17 @@ export default function App() {
           <div className="brand-mark"><MicrophoneIcon /></div>
           <div><h1>STT Simple</h1><p>Говорите. Получайте текст.</p></div>
         </div>
-        <button className="button button-quiet" disabled={locked}
-          onClick={() => void runAction('quit_app', backend.quitApp)}>
-          {pending === 'quit_app' ? 'Закрытие…' : 'Выйти'}
-        </button>
+        <div className="header-actions">
+          <button ref={navigationButton} className="button button-secondary button-small" aria-controls="settings-page"
+            aria-expanded={page === 'settings'} onClick={() => navigate(page === 'home' ? 'settings' : 'home')}>
+            {page === 'home' ? 'Настройки' : 'К диктовке'}
+            {settingsChanged && <span className="unsaved-dot" aria-label="Есть несохранённые изменения" />}
+          </button>
+          <button className="button button-quiet button-small" disabled={locked}
+            onClick={() => void runAction('quit_app', backend.quitApp)}>
+            {pending === 'quit_app' ? 'Закрытие…' : 'Выйти'}
+          </button>
+        </div>
       </header>
 
       <div className="notifications">
@@ -188,6 +214,7 @@ export default function App() {
         <div className="feedback" role="status" aria-live="polite">{feedback}</div>
       </div>
 
+      <div className="home-page" hidden={page !== 'home'}>
       <section className={`card recording-card${recording ? ' is-recording' : ''}`} aria-labelledby="recording-heading">
         <div className="section-heading">
           <h2 id="recording-heading">Диктовка</h2>
@@ -196,6 +223,10 @@ export default function App() {
             {snapshot ? statusText(snapshot.phase) : syncError ? 'Нет подключения' : 'Подключение…'}
           </span>
         </div>
+        {snapshot && <p className="recording-summary">
+          <span>Микрофон: <strong>{activeMicrophone}</strong></span>
+          <span>Обработка: <strong>{activeProfile?.name || 'Выключена'}</strong></span>
+        </p>}
         <div className="recording-content">
           <div className="recording-symbol" aria-hidden="true"><MicrophoneIcon /></div>
           <div className="timer" role="timer" aria-label="Длительность текущей записи" aria-live="off">
@@ -234,6 +265,9 @@ export default function App() {
         </div>
       </section>
 
+      <TranscriptResult snapshot={snapshot} connected={connected} pending={pending} runAction={runAction}
+        autoPaste={snapshot?.settings.auto_paste ?? false} mac={mac} linux={linux} />
+
       <section className={`card speech-card${speaking ? ' is-speaking' : ''}`} aria-labelledby="speech-heading">
         <div className="section-heading">
           <h2 id="speech-heading">Озвучивание буфера</h2>
@@ -262,52 +296,28 @@ export default function App() {
         {(recording || processing) && <p className="help lock-hint">Озвучивание доступно после завершения записи и распознавания.</p>}
       </section>
 
-      <section className="card transcript-card" aria-labelledby="transcript-heading">
-        <div className="section-heading">
-          <h2 id="transcript-heading">Последний результат</h2>
-          <button className="button button-secondary button-small"
-            disabled={!connected || !canRunAction('copy_last_transcript', snapshot) || pending !== null}
-            onClick={async () => {
-              if (await runAction('copy_last_transcript', backend.copyLastTranscript)) {
-                setFeedback('Текст скопирован в буфер обмена.');
-              }
-            }}>
-            {pending === 'copy_last_transcript' ? 'Копирование…' : 'Скопировать'}
-          </button>
-        </div>
-        <div className="field">
-          <label htmlFor="raw-transcript">Исходный текст распознавания</label>
-          <textarea id="raw-transcript" className="transcript" readOnly rows={5}
-            value={snapshot?.last_raw_transcript ?? ''} placeholder="Здесь появится исходный текст." />
-        </div>
-        <p className="help">Последний успешный итоговый текст</p>
-        <label className="visually-hidden" htmlFor="transcript">Текст последней диктовки</label>
-        <textarea id="transcript" className="transcript" readOnly rows={7}
-          value={snapshot?.last_transcript ?? ''} placeholder="Здесь появится итоговый текст после успешной обработки."
-          aria-describedby="transcript-help" />
-        <p className="help">Исходный и итоговый текст хранятся только в памяти приложения.
-          При ошибке полировки исходный текст остаётся доступен, а итоговый появится после успешного повтора.</p>
-        {snapshot?.can_retry_polish && <div className="field">
-          <p className="help" id="retry-polish-help">Повтор использует настройки неудавшейся задачи,
-            а не текущие настройки. Успешный результат только копируется, без автоматической вставки.
-            Это дополнительный платный запрос в OpenAI.</p>
-          <button className="button button-secondary" aria-describedby="retry-polish-help"
-            disabled={!connected || pending !== null || !canRunAction('retry_polish', snapshot)}
-            onClick={() => void runAction('retry_polish', backend.retryPolish)}>
-            {pending === 'retry_polish' ? 'Повтор…' : 'Повторить обработку текста'}
-          </button>
-        </div>}
-        <p className="help" id="transcript-help">{(mac || linux) && snapshot?.settings.auto_paste
-          ? 'При записи, начатой глобальным hotkey и остановленной hotkey или автоматически по лимиту, текст автоматически вставляется в активное поле на момент завершения распознавания и обработки текста и остаётся в буфере обмена.'
-          : 'Текст копируется в буфер обмена — вставьте его рабочим для целевого поля сочетанием: Cmd+V на macOS, Ctrl+V или Ctrl+Shift+V на Linux.'}</p>
-      </section>
+      </div>
 
+      <div id="settings-page" hidden={page !== 'settings'}>
+        <div className="settings-page-heading">
+          <h2 ref={pageHeading} tabIndex={-1}>Настройки приложения</h2>
+          <p className="section-description">Настройте диктовку и озвучивание. Изменения применяются после сохранения.</p>
+          {settingsChanged && <p className="draft-notice" role="status">Есть несохранённые изменения. Черновик сохраняется при переходе к диктовке.</p>}
+        </div>
+        <nav className="settings-navigation" aria-label="Разделы настроек">
+          <a href="#dictation-settings">Диктовка</a>
+          <a href="#tts-settings-heading">Озвучивание</a>
+          <a href="#polish-settings">Обработка текста</a>
+          <a href="#key-heading">Подключение</a>
+        </nav>
       <div className="settings-grid">
         <section className="card" aria-labelledby="settings-heading">
-          <div className="section-heading"><h2 id="settings-heading">Настройки</h2><span className="section-meta">Распознавание и озвучивание</span></div>
+          <div className="section-heading"><h2 id="settings-heading">Диктовка и озвучивание</h2></div>
           <form onSubmit={(event) => void saveSettings(event)}>
             <fieldset disabled={locked}>
               <legend className="visually-hidden">Микрофон, модели, голос и сочетания клавиш</legend>
+              <section id="dictation-settings" aria-labelledby="dictation-settings-heading">
+                <h3 id="dictation-settings-heading" className="settings-group-heading">Диктовка</h3>
               <div className="field">
                 <div className="field-heading">
                   <label htmlFor="microphone">Микрофон</label>
@@ -362,7 +372,44 @@ export default function App() {
                     ? 'После сохранения приложение создаст или обновит сочетания диктовки и переключения обработки в GNOME. Чужие сочетания не перезаписываются.'
                     : 'После сохранения приложение зарегистрирует сочетание в системе.'}</p>
               </div>
-              <div className="settings-subsection" aria-labelledby="tts-settings-heading">
+              <div className="settings-subsection" aria-labelledby="paste-settings-heading">
+                <h3 id="paste-settings-heading">Вставка результата</h3>
+              {(mac || linux) && (
+                <div className="field checkbox-field">
+                  <label className="checkbox-label" htmlFor="auto-paste">
+                    <input id="auto-paste" type="checkbox" checked={draft.auto_paste} aria-describedby="auto-paste-help"
+                      onChange={(event) => updateDraft('auto_paste', event.target.checked)} />
+                    <span>Автоматически вставлять результат</span>
+                  </label>
+                  <p className="help" id="auto-paste-help">По умолчанию выключено. Работает только для записи,
+                    начатой глобальным hotkey и остановленной hotkey или автоматически по лимиту.
+                    Кнопка и меню трея только копируют текст. Не переключайте фокус: вставка идёт
+                    в активное поле на момент завершения распознавания. {mac
+                      ? 'macOS запросит разрешение «Универсальный доступ» для Cmd+V; при отказе текст всё равно останется в буфере обмена.'
+                      : <>{systemHotkey
+                        ? 'Wayland: нужен ydotool; для современного ydotool 1.x самостоятельно настройте демон, доступ к uinput и сокету по инструкции вашего дистрибутива. YDOTOOL_SOCKET наследуется из окружения приложения. Пакет Ubuntu 22.04 может быть устаревшим.'
+                        : 'X11: нужен xdotool в PATH.'} Приложение не запускает sudo и не настраивает службы.
+                        При ошибке или тайм-ауте 5 секунд текст остаётся в буфере обмена.</>}</p>
+                </div>
+              )}
+              {linux && (
+                <div className="field">
+                  <label htmlFor="paste-shortcut">Сочетание для вставки</label>
+                  <select id="paste-shortcut" value={draft.paste_shortcut} disabled={!draft.auto_paste}
+                    aria-describedby="paste-shortcut-help"
+                    onChange={(event) => updateDraft('paste_shortcut', event.target.value as Settings['paste_shortcut'])}>
+                    <option value="ctrl_v">Ctrl+V</option>
+                    <option value="ctrl_shift_v">Ctrl+Shift+V</option>
+                  </select>
+                  <p className="help" id="paste-shortcut-help">По умолчанию Ctrl+V. Выберите сочетание, которое
+                    работает вручную в целевом поле. Ctrl+Shift+V может подойти для вставки обычного текста
+                    в чат Zed или в терминал — проверьте конкретное поле. Выбор один для всех приложений:
+                    приложение не определяет цель и не пробует второе сочетание после первого.</p>
+                </div>
+              )}
+              </div>
+              </section>
+              <section className="settings-subsection" aria-labelledby="tts-settings-heading">
                 <h3 id="tts-settings-heading">Озвучивание</h3>
                 <div className="field">
                   <label htmlFor="tts-model">TTS-модель</label>
@@ -415,40 +462,8 @@ export default function App() {
                       ? ' На Wayland назначьте показанную ниже команду --toggle-tts вручную; автоматическая регистрация GNOME применяется к диктовке и переключению обработки.'
                       : ' После сохранения приложение зарегистрирует сочетание в системе.'}</p>
                 </div>
-              </div>
-              {(mac || linux) && (
-                <div className="field checkbox-field">
-                  <label className="checkbox-label" htmlFor="auto-paste">
-                    <input id="auto-paste" type="checkbox" checked={draft.auto_paste} aria-describedby="auto-paste-help"
-                      onChange={(event) => updateDraft('auto_paste', event.target.checked)} />
-                    <span>Автоматически вставлять результат</span>
-                  </label>
-                  <p className="help" id="auto-paste-help">По умолчанию выключено. Работает только для записи,
-                    начатой глобальным hotkey и остановленной hotkey или автоматически по лимиту.
-                    Кнопка и меню трея только копируют текст. Не переключайте фокус: вставка идёт
-                    в активное поле на момент завершения распознавания. {mac
-                      ? 'macOS запросит разрешение «Универсальный доступ» для Cmd+V; при отказе текст всё равно останется в буфере обмена.'
-                      : <>{systemHotkey
-                        ? 'Wayland: нужен ydotool; для современного ydotool 1.x самостоятельно настройте демон, доступ к uinput и сокету по инструкции вашего дистрибутива. YDOTOOL_SOCKET наследуется из окружения приложения. Пакет Ubuntu 22.04 может быть устаревшим.'
-                        : 'X11: нужен xdotool в PATH.'} Приложение не запускает sudo и не настраивает службы.
-                        При ошибке или тайм-ауте 5 секунд текст остаётся в буфере обмена.</>}</p>
-                </div>
-              )}
-              {linux && (
-                <div className="field">
-                  <label htmlFor="paste-shortcut">Сочетание для вставки</label>
-                  <select id="paste-shortcut" value={draft.paste_shortcut} disabled={!draft.auto_paste}
-                    aria-describedby="paste-shortcut-help"
-                    onChange={(event) => updateDraft('paste_shortcut', event.target.value as Settings['paste_shortcut'])}>
-                    <option value="ctrl_v">Ctrl+V</option>
-                    <option value="ctrl_shift_v">Ctrl+Shift+V</option>
-                  </select>
-                  <p className="help" id="paste-shortcut-help">По умолчанию Ctrl+V. Выберите сочетание, которое
-                    работает вручную в целевом поле. Ctrl+Shift+V может подойти для вставки обычного текста
-                    в чат Zed или в терминал — проверьте конкретное поле. Выбор один для всех приложений:
-                    приложение не определяет цель и не пробует второе сочетание после первого.</p>
-                </div>
-              )}
+              </section>
+              <div id="polish-settings" className="settings-subsection">
               <div className="field">
                 <label htmlFor="polish-shortcut">Сочетание клавиш переключения обработки</label>
                 <input id="polish-shortcut" value={draft.polish_shortcut} maxLength={128} spellCheck={false}
@@ -462,6 +477,7 @@ export default function App() {
                 value={draft.polish} builtins={snapshot?.builtin_polish_profiles ?? []}
                 hasApiKey={snapshot?.has_api_key ?? false}
                 onChange={(value) => updateDraft('polish', value)} />
+              </div>
               <button className="button button-secondary" type="submit" disabled={!settingsChanged && !systemHotkey}>
                 {pending === 'save_settings' ? 'Сохранение…' : 'Сохранить настройки'}
               </button>
@@ -474,7 +490,7 @@ export default function App() {
 
         <section className="card" aria-labelledby="key-heading">
           <div className="section-heading">
-            <h2 id="key-heading">API-ключ</h2>
+            <h2 id="key-heading">Подключение</h2>
             <span className={`key-badge${snapshot?.has_api_key ? ' key-saved' : ''}`}>
               {snapshot ? snapshot.has_api_key ? 'Сохранён' : 'Не задан' : 'Проверка…'}
             </span>
@@ -557,17 +573,19 @@ export default function App() {
         </aside>
       )}
 
-      <section className="card statistics-card" aria-labelledby="statistics-heading">
+      </div>
+
+      <section className={`card statistics-card${page === 'home' ? ' statistics-compact' : ''}`} aria-labelledby="statistics-heading">
         <div className="section-heading">
           <h2 id="statistics-heading">Статистика</h2>
-          <button className="text-button" disabled={locked || !snapshot
+          <button className="text-button" hidden={page !== 'settings'} disabled={locked || !snapshot
             || (snapshot.statistics.recordings === 0 && snapshot.statistics.total_recording_seconds === 0
               && snapshot.statistics.last_recording_seconds === 0)}
             onClick={() => setConfirmReset(true)}>
             {pending === 'reset_statistics' ? 'Сброс…' : 'Сбросить'}
           </button>
         </div>
-        {confirmReset && (
+        {confirmReset && page === 'settings' && (
           <div className="reset-confirmation" role="group" aria-labelledby="reset-question">
             <p id="reset-question">Сбросить длительность и количество записей?</p>
             <div className="form-actions">

@@ -1032,6 +1032,42 @@ async fn copy_last_transcript(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn copy_last_raw_transcript(app: AppHandle) -> Result<(), String> {
+    let runtime = app.state::<Runtime>();
+    copy_last_raw_transcript_runtime(&runtime, |text| async {
+        let result = clipboard::write_text(&app, text).await;
+        if let Err(error) = &result {
+            commit_idle(&app, Some(error.clone()));
+        }
+        result
+    })
+    .await
+}
+
+async fn copy_last_raw_transcript_runtime<F, Fut>(runtime: &Runtime, write: F) -> Result<(), String>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
+    let _guard = runtime
+        .control
+        .try_lock()
+        .map_err(|_| "Дождитесь завершения предыдущего действия.".to_owned())?;
+    runtime
+        .data
+        .lock()
+        .expect("application state poisoned")
+        .ensure_idle()?;
+    let _clipboard = runtime.clipboard.lock().await;
+    let text = runtime
+        .snapshot()
+        .last_raw_transcript
+        .filter(|text| !text.is_empty())
+        .ok_or_else(|| "Пока нет исходного текста для копирования.".to_owned())?;
+    write(text).await
+}
+
+#[tauri::command]
 fn quit_app(app: AppHandle) {
     shutdown(&app);
 }
@@ -1197,7 +1233,7 @@ pub fn run() {
                     tts_hotkey_available: false, tts_hotkey_command: None, tts_hotkey_message: None,
                     polish_hotkey_available: false, polish_hotkey_command: if wayland { Some(shortcuts::wayland_polish_command()) } else { None }, polish_hotkey_message: None,
                     stored, phase: Phase::Idle, session: None, next_session_id: 0,
-                    last_transcript: None, last_raw_transcript: None, pending_polish: None, last_error, has_api_key,
+                    last_transcript: None, previous_transcript: None, last_raw_transcript: None, pending_polish: None, last_error, has_api_key,
                     hotkey_available: false, hotkey_message: None,
                     hotkey_mode: if wayland { HotkeyMode::System } else { HotkeyMode::Native },
                     hotkey_command: if wayland { Some(shortcuts::wayland_command()) } else { None } }),
@@ -1237,7 +1273,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![get_snapshot, list_input_devices, list_openai_models,
             save_settings, cycle_polish_profile, set_api_key, delete_api_key, reset_statistics,
-            toggle_recording, toggle_speech, cancel_recording, copy_last_transcript, retry_polish, quit_app])
+            toggle_recording, toggle_speech, cancel_recording, copy_last_transcript, copy_last_raw_transcript, retry_polish, quit_app])
         .run(tauri::generate_context!())
         .expect("failed to run STT Simple");
 }
@@ -1263,6 +1299,7 @@ mod tests {
                 session: None,
                 next_session_id: 0,
                 last_transcript: Some("previous".into()),
+                previous_transcript: None,
                 last_raw_transcript: None,
                 pending_polish: None,
                 last_error: Some("previous error".into()),
@@ -1278,6 +1315,165 @@ mod tests {
             client: OpenAiClient::new().unwrap(),
             storage_path: Default::default(),
         }
+    }
+
+    #[test]
+    fn copy_last_raw_transcript_requires_idle_control_and_nonempty_raw() {
+        tauri::async_runtime::block_on(async {
+            for phase in [
+                Phase::Recording,
+                Phase::Transcribing,
+                Phase::Polishing,
+                Phase::Synthesizing,
+                Phase::Playing,
+            ] {
+                let runtime = models_runtime(phase);
+                runtime.data.lock().unwrap().last_raw_transcript = Some("raw".into());
+                assert!(copy_last_raw_transcript_runtime(&runtime, |_| async {
+                    panic!("must not copy while busy")
+                })
+                .await
+                .is_err());
+                assert!(runtime.control.try_lock().is_ok());
+                assert!(runtime.clipboard.try_lock().is_ok());
+                assert!(runtime.snapshot().phase == phase);
+                assert_eq!(
+                    runtime.snapshot().last_transcript.as_deref(),
+                    Some("previous")
+                );
+                assert_eq!(
+                    runtime.snapshot().last_raw_transcript.as_deref(),
+                    Some("raw")
+                );
+            }
+
+            let runtime = models_runtime(Phase::Idle);
+            runtime.data.lock().unwrap().last_raw_transcript = Some("raw".into());
+            let guard = runtime.control.lock().await;
+            assert!(copy_last_raw_transcript_runtime(&runtime, |_| async {
+                panic!("must not copy without control")
+            })
+            .await
+            .unwrap_err()
+            .contains("предыдущего действия"));
+            drop(guard);
+
+            for raw in [None, Some(String::new())] {
+                runtime.data.lock().unwrap().last_raw_transcript = raw.clone();
+                assert!(copy_last_raw_transcript_runtime(&runtime, |_| async {
+                    panic!("must not copy missing or empty raw, or fall back to final text")
+                })
+                .await
+                .unwrap_err()
+                .contains("нет исходного текста"));
+                assert!(runtime.control.try_lock().is_ok());
+                assert!(runtime.clipboard.try_lock().is_ok());
+                assert_eq!(runtime.snapshot().last_raw_transcript, raw);
+                assert_eq!(
+                    runtime.snapshot().last_transcript.as_deref(),
+                    Some("previous")
+                );
+                assert_eq!(
+                    runtime.snapshot().last_error.as_deref(),
+                    Some("previous error")
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn copy_last_raw_transcript_preserves_text_and_state_and_releases_locks() {
+        tauri::async_runtime::block_on(async {
+            for outcome in [Ok(()), Err("clipboard unavailable".to_owned())] {
+                let mut runtime = models_runtime(Phase::Idle);
+                runtime.storage_path = test_storage_path("copy-raw-no-save");
+                assert!(!runtime.storage_path.exists());
+                let raw = "  Исходный текст 😀\n";
+                {
+                    let mut data = runtime.data.lock().unwrap();
+                    data.stored.settings.auto_paste = true;
+                    data.stored.settings.polish.profile_id = Some("polish".into());
+                    let polish = data.stored.settings.polish.clone();
+                    assert_eq!(
+                        data.accept_transcript(raw.into(), polish).unwrap(),
+                        TranscriptProcessing::Polish
+                    );
+                    data.phase = Phase::Idle;
+                }
+                let before = runtime.snapshot();
+                assert!(before.last_transcript.is_none());
+                assert_eq!(before.previous_transcript.as_deref(), Some("previous"));
+                assert!(before.has_pending_polish);
+                let pending_before = runtime.data.lock().unwrap().pending_polish.clone();
+                let expected = outcome.clone();
+                let runtime_ref = &runtime;
+                let result = copy_last_raw_transcript_runtime(&runtime, |text| async move {
+                    assert_eq!(text, raw);
+                    assert!(runtime_ref.control.try_lock().is_err());
+                    assert!(runtime_ref.clipboard.try_lock().is_err());
+                    assert!(runtime_ref.data.try_lock().is_ok());
+                    outcome
+                })
+                .await;
+                assert_eq!(result, expected);
+                assert!(runtime.control.try_lock().is_ok());
+                assert!(runtime.clipboard.try_lock().is_ok());
+                let after = runtime.snapshot();
+                assert!(after.phase == Phase::Idle);
+                assert_eq!(after.last_transcript, before.last_transcript);
+                assert_eq!(after.previous_transcript, before.previous_transcript);
+                assert_eq!(after.last_raw_transcript, before.last_raw_transcript);
+                assert_eq!(after.has_pending_polish, before.has_pending_polish);
+                assert_eq!(after.last_error, before.last_error);
+                assert_eq!(after.settings, before.settings);
+                assert_eq!(after.statistics.recordings, before.statistics.recordings);
+                assert_eq!(
+                    after.statistics.last_recording_seconds,
+                    before.statistics.last_recording_seconds
+                );
+                assert_eq!(
+                    after.statistics.total_recording_seconds,
+                    before.statistics.total_recording_seconds
+                );
+                assert_eq!(after.can_retry_polish, before.can_retry_polish);
+                assert_eq!(runtime.data.lock().unwrap().pending_polish, pending_before);
+                assert!(!runtime.storage_path.exists());
+            }
+        });
+    }
+
+    #[test]
+    fn copy_last_raw_transcript_reads_current_raw_after_clipboard_lock() {
+        tauri::async_runtime::block_on(async {
+            let runtime = models_runtime(Phase::Idle);
+            runtime.data.lock().unwrap().last_raw_transcript = Some("old raw".into());
+            let clipboard_guard = runtime.clipboard.lock().await;
+            let runtime_ref = &runtime;
+            let mut copy = Box::pin(copy_last_raw_transcript_runtime(
+                &runtime,
+                |text| async move {
+                    assert_eq!(text, "current raw");
+                    assert!(runtime_ref.control.try_lock().is_err());
+                    assert!(runtime_ref.clipboard.try_lock().is_err());
+                    Ok(())
+                },
+            ));
+            std::future::poll_fn(|cx| {
+                assert!(std::future::Future::poll(copy.as_mut(), cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+            assert!(runtime.control.try_lock().is_err());
+            runtime.data.lock().unwrap().last_raw_transcript = Some("current raw".into());
+            drop(clipboard_guard);
+            copy.await.unwrap();
+            assert!(runtime.control.try_lock().is_ok());
+            assert!(runtime.clipboard.try_lock().is_ok());
+            assert_eq!(
+                runtime.snapshot().last_transcript.as_deref(),
+                Some("previous")
+            );
+        });
     }
 
     fn cycle_runtime(phase: Phase, storage_path: std::path::PathBuf) -> Runtime {

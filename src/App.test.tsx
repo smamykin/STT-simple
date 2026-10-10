@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
 import { StrictMode } from 'react';
-import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, renderHook, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
 import { useAppState } from './useAppState';
+import { TranscriptResult } from './TranscriptResult';
 import { deferred, makeSnapshot } from './testFixtures';
-import type { Settings, Snapshot } from './types';
+import type { Action, Settings, Snapshot } from './types';
 import { MODELS } from './utils';
 
 const backend = vi.hoisted(() => ({
@@ -20,6 +21,7 @@ const backend = vi.hoisted(() => ({
   cancelRecording: vi.fn(),
   resetStatistics: vi.fn(),
   copyLastTranscript: vi.fn(),
+  copyLastRawTranscript: vi.fn(),
   retryPolish: vi.fn(),
   cyclePolishProfile: vi.fn(),
   quitApp: vi.fn(),
@@ -38,13 +40,32 @@ function emit(snapshot: Snapshot) {
 async function mount(snapshot = makeSnapshot()) {
   backend.getSnapshot.mockResolvedValue(snapshot);
   const app = render(<StrictMode><App /></StrictMode>);
-  await waitFor(() => expect(screen.getByLabelText('Сочетание клавиш')).toHaveProperty('value', snapshot.settings.shortcut));
+  await waitFor(() => expect(backend.listInputDevices).toHaveBeenCalledOnce());
+  await waitFor(() => expect(screen.queryByLabelText('Есть несохранённые изменения')).toBeNull());
+  return app;
+}
+
+function openSettings() {
+  fireEvent.click(screen.getByRole('button', { name: /^Настройки/ }));
+  expect(screen.getByRole('heading', { name: 'Настройки приложения' })).toBeTruthy();
+}
+
+function openHome() {
+  fireEvent.click(screen.getByRole('button', { name: /^К диктовке/ }));
+  expect(screen.getByRole('region', { name: 'Последний результат' })).toBeTruthy();
+}
+
+async function mountSettings(snapshot = makeSnapshot()) {
+  const app = await mount(snapshot);
+  openSettings();
+  await waitFor(() => expect(screen.getByRole('textbox', { name: 'Сочетание клавиш' })).toHaveProperty('value', snapshot.settings.shortcut));
   return app;
 }
 
 beforeEach(() => {
   vi.resetAllMocks();
   listeners.clear();
+  vi.spyOn(window, 'scrollTo').mockImplementation(() => {});
   backend.getSnapshot.mockResolvedValue(makeSnapshot());
   backend.listInputDevices.mockResolvedValue([
     { id: 'mic-1', name: 'USB микрофон', is_default: true },
@@ -66,7 +87,7 @@ describe('polishing interface', () => {
   const refreshModels = () => screen.getByRole('button', { name: 'Обновить модели OpenAI' });
 
   it('refreshes explicitly, deduplicates without capability filtering and preserves dirty settings on errors and empty results', async () => {
-    await mount();
+    await mountSettings();
     expect(backend.listOpenAiModels).not.toHaveBeenCalled();
     fireEvent.change(screen.getByLabelText('Сочетание клавиш'), { target: { value: 'Super+T' } });
     const response = deferred<{ id: string; created: number }[]>();
@@ -95,7 +116,7 @@ describe('polishing interface', () => {
   });
 
   it('invalidates pending catalogs when replacing a stored key and on unmount', async () => {
-    const app = await mount();
+    const app = await mountSettings();
     const stale = deferred<{ id: string; created: number }[]>();
     backend.listOpenAiModels.mockReturnValueOnce(stale.promise);
     fireEvent.click(refreshModels());
@@ -117,6 +138,7 @@ describe('polishing interface', () => {
     backend.getSnapshot.mockRejectedValue(new Error('offline'));
     render(<App />);
     await screen.findByText('Нет связи с приложением');
+    openSettings();
     expect(refreshModels().matches(':disabled')).toBe(true);
     fireEvent.click(refreshModels());
     expect(backend.listOpenAiModels).not.toHaveBeenCalled();
@@ -124,7 +146,7 @@ describe('polishing interface', () => {
 
   it('allows manual IDs without a key and inherits busy disabling', async () => {
     const snapshot = makeSnapshot({ has_api_key: false });
-    await mount(snapshot);
+    await mountSettings(snapshot);
     expect(refreshModels().matches(':disabled')).toBe(true);
     fireEvent.change(screen.getByLabelText('Модель обработки текста'), { target: { value: '__custom__' } });
     fireEvent.change(screen.getByLabelText('ID модели обработки OpenAI'), { target: { value: 'my-model' } });
@@ -137,7 +159,7 @@ describe('polishing interface', () => {
   it.each(['gpt-6-luna', 'gpt-6.1-sol', 'gpt-6-astra'])('shows documented efforts for %s and retains incompatible saved values', async (model) => {
     const snapshot = makeSnapshot();
     snapshot.settings.polish = { ...snapshot.settings.polish, model, effort: 'minimal' };
-    await mount(snapshot);
+    await mountSettings(snapshot);
     const effort = screen.getByLabelText('Уровень рассуждения') as HTMLSelectElement;
     expect(effort.value).toBe('minimal');
     expect(screen.getByText(/не поддерживается выбранной моделью/)).toBeTruthy();
@@ -150,7 +172,7 @@ describe('polishing interface', () => {
   it('preserves legacy saved models and exposes all efforts for unknown capabilities', async () => {
     const snapshot = makeSnapshot();
     snapshot.settings.polish = { ...snapshot.settings.polish, model: 'gpt-5-mini', effort: 'minimal' };
-    await mount(snapshot);
+    await mountSettings(snapshot);
     expect(screen.getByLabelText('ID модели обработки OpenAI')).toHaveProperty('value', 'gpt-5-mini');
     expect(screen.getByLabelText('Уровень рассуждения')).toHaveProperty('value', 'minimal');
     expect(screen.getByText(/\/models не содержит метаданных/)).toBeTruthy();
@@ -160,7 +182,7 @@ describe('polishing interface', () => {
   it('loads builtin profiles from the snapshot and keeps their instructions immutable', async () => {
     const snapshot = makeSnapshot();
     snapshot.builtin_polish_profiles[0] = { id: 'polish', name: 'Правка из core', mode: 'llm', instruction: 'Инструкция из core', prefix: '', suffix: '' };
-    await mount(snapshot);
+    await mountSettings(snapshot);
     expect(screen.getByLabelText('Профиль обработки текста')).toHaveProperty('value', '');
     expect(screen.getByLabelText('Модель обработки текста')).toHaveProperty('value', 'gpt-6-luna');
     expect(screen.getByLabelText('Уровень рассуждения')).toHaveProperty('value', '');
@@ -184,7 +206,7 @@ describe('polishing interface', () => {
       custom_profiles: [{ id: 'custom-test', name: 'Мой профиль', mode: 'llm', instruction: 'Инструкция', prefix: '', suffix: '' }],
       favorite_profile_ids: ['markdown'],
     };
-    await mount(snapshot);
+    await mountSettings(snapshot);
     const polish = screen.getByLabelText('Избранный профиль: Минимальная правка');
     const markdown = screen.getByLabelText('Избранный профиль: Markdown');
     const developer = screen.getByLabelText('Избранный профиль: Сообщение разработчика');
@@ -208,7 +230,7 @@ describe('polishing interface', () => {
       vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (X11; Linux x86_64)');
       const snapshot = makeSnapshot({ hotkey_mode: 'system', polish_hotkey_available: true });
       snapshot.settings.polish_shortcut = 'Super+Backslash';
-      await mount(snapshot);
+      await mountSettings(snapshot);
       expect(screen.getByLabelText('Сочетание клавиш переключения обработки')).toHaveProperty('value', 'Super+Backslash');
       expect(screen.getByLabelText('Сочетание клавиш переключения обработки')).toHaveProperty('placeholder', 'Super+Backslash');
       const shortcut = screen.getAllByText('Win+\\', { selector: 'kbd' });
@@ -223,7 +245,7 @@ describe('polishing interface', () => {
     vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(
       'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/605.1.15',
     );
-    await mount();
+    await mountSettings();
     expect(screen.getByLabelText('Сочетание клавиш переключения обработки')).toHaveProperty('value', 'Control+Super+Backslash');
     expect(screen.getByText('Ctrl+Cmd+\\', { selector: 'kbd' })).toBeTruthy();
     emit(makeSnapshot({ phase: 'recording' }));
@@ -235,7 +257,7 @@ describe('polishing interface', () => {
 
   it('edits and saves a local profile with exact prefix and suffix without an LLM instruction', async () => {
     const snapshot = makeSnapshot();
-    await mount(snapshot);
+    await mountSettings(snapshot);
     backend.saveSettings.mockImplementation(async (settings: Settings) => ({ ...snapshot, settings }));
     fireEvent.click(screen.getByRole('button', { name: 'Создать профиль' }));
     expect(screen.getByLabelText('Способ обработки')).toHaveProperty('value', 'llm');
@@ -256,7 +278,7 @@ describe('polishing interface', () => {
 
   it('creates, edits and deletes custom profiles only through the existing settings save', async () => {
     let snapshot = makeSnapshot();
-    await mount(snapshot);
+    await mountSettings(snapshot);
     backend.saveSettings.mockImplementation(async (settings: Settings) => {
       snapshot = { ...snapshot, settings };
       backend.getSnapshot.mockResolvedValue(snapshot);
@@ -299,7 +321,7 @@ describe('polishing interface', () => {
 
   it('rebases an untouched profile selection after an external cycle without discarding other dirty fields', async () => {
     const initial = makeSnapshot();
-    await mount(initial);
+    await mountSettings(initial);
     fireEvent.change(screen.getByLabelText('Сочетание клавиш'), { target: { value: 'Super+T' } });
     const cycled = makeSnapshot();
     cycled.settings.polish.profile_id = 'markdown';
@@ -315,7 +337,7 @@ describe('polishing interface', () => {
 
   it('preserves an explicitly edited profile selection when an external cycle arrives', async () => {
     const initial = makeSnapshot();
-    await mount(initial);
+    await mountSettings(initial);
     fireEvent.change(screen.getByLabelText('Профиль обработки текста'), { target: { value: 'developer' } });
     fireEvent.change(screen.getByLabelText('Сочетание клавиш'), { target: { value: 'Super+T' } });
     const cycled = makeSnapshot();
@@ -337,7 +359,7 @@ describe('polishing interface', () => {
       custom_profiles: [{ id: 'custom-test', name: 'Мой профиль', mode: 'llm', instruction: 'Инструкция', prefix: '', suffix: '' }],
       favorite_profile_ids: ['polish', 'custom-test'],
     };
-    await mount(snapshot);
+    await mountSettings(snapshot);
     backend.saveSettings.mockImplementation(async (settings: Settings) => ({ ...snapshot, settings }));
     fireEvent.click(screen.getByRole('button', { name: 'Удалить профиль' }));
     fireEvent.click(screen.getByRole('button', { name: 'Сохранить настройки' }));
@@ -347,7 +369,7 @@ describe('polishing interface', () => {
 
   it.each(['', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])('saves a custom model and effort %j without resetting the draft on state events', async (effort) => {
     const initial = makeSnapshot();
-    await mount(initial);
+    await mountSettings(initial);
     fireEvent.change(screen.getByLabelText('Профиль обработки текста'), { target: { value: 'developer' } });
     fireEvent.change(screen.getByLabelText('Модель обработки текста'), { target: { value: '__custom__' } });
     fireEvent.change(screen.getByLabelText('ID модели обработки OpenAI'), { target: { value: ' custom-model.v2 ' } });
@@ -364,7 +386,7 @@ describe('polishing interface', () => {
   });
 
   it('validates custom profiles even when processing is switched off and retains drafts after a failed save', async () => {
-    await mount();
+    await mountSettings();
     fireEvent.click(screen.getByRole('button', { name: 'Создать профиль' }));
     fireEvent.change(screen.getByLabelText('Профиль обработки текста'), { target: { value: '' } });
     fireEvent.click(screen.getByRole('button', { name: 'Сохранить настройки' }));
@@ -381,46 +403,71 @@ describe('polishing interface', () => {
   });
 
   it('retries only the failed backend job without submitting draft settings or copying the raw text', async () => {
-    const initial = makeSnapshot({ last_raw_transcript: 'сырой текст', last_transcript: 'Предыдущий успех', can_retry_polish: true });
+    const initial = makeSnapshot({
+      last_raw_transcript: 'сырой текст', last_transcript: null,
+      previous_transcript: 'Предыдущий успех', can_retry_polish: true,
+    });
     await mount(initial);
     expect(screen.getByLabelText('Исходный текст распознавания')).toHaveProperty('value', 'сырой текст');
-    expect(screen.getByLabelText('Текст последней диктовки')).toHaveProperty('value', 'Предыдущий успех');
-    fireEvent.change(screen.getByLabelText('Профиль обработки текста'), { target: { value: 'markdown' } });
+    expect(screen.queryByRole('textbox', { name: 'Текст последней диктовки' })).toBeNull();
+    fireEvent.click(screen.getByText('Предыдущий успешный результат', { selector: 'summary' }));
+    expect(screen.getByRole('textbox', { name: 'Предыдущий успешный текст' })).toHaveProperty('value', 'Предыдущий успех');
+    openSettings();
+    fireEvent.change(screen.getByRole('combobox', { name: 'Профиль обработки текста' }), { target: { value: 'markdown' } });
+    expect(screen.queryByRole('button', { name: 'Повторить обработку текста' })).toBeNull();
+    openHome();
     expect(screen.getByText(/Повтор использует настройки неудавшейся задачи/)).toBeTruthy();
     const retry = deferred<void>();
     backend.retryPolish.mockReturnValue(retry.promise);
     fireEvent.click(screen.getByRole('button', { name: 'Повторить обработку текста' }));
     expect(backend.retryPolish).toHaveBeenCalledExactlyOnceWith();
     expect(screen.getByRole('button', { name: 'Повтор…' })).toHaveProperty('disabled', true);
-    expect(screen.getByLabelText('Профиль обработки текста').matches(':disabled')).toBe(true);
+    openSettings();
+    expect(screen.getByRole('combobox', { name: 'Профиль обработки текста' }).matches(':disabled')).toBe(true);
+    openHome();
     expect(backend.saveSettings).not.toHaveBeenCalled();
     expect(backend.copyLastTranscript).not.toHaveBeenCalled();
-    const success = { ...initial, can_retry_polish: false, last_transcript: 'Готовый результат' };
+    expect(backend.copyLastRawTranscript).not.toHaveBeenCalled();
+    const success = {
+      ...initial, can_retry_polish: false, has_pending_polish: false,
+      previous_transcript: null, last_transcript: 'Готовый результат',
+    };
     backend.getSnapshot.mockResolvedValue(success);
     await act(async () => retry.resolve());
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Повторить обработку текста' })).toBeNull());
-    expect(screen.getByLabelText('Текст последней диктовки')).toHaveProperty('value', 'Готовый результат');
-    expect(screen.getByLabelText('Профиль обработки текста')).toHaveProperty('value', 'markdown');
+    expect(screen.getByRole('textbox', { name: 'Текст последней диктовки' })).toHaveProperty('value', 'Готовый результат');
+    expect(screen.queryByText('Обработка текста не завершена')).toBeNull();
+    expect(screen.queryByText('Предыдущий успешный результат')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Показать исходный текст' }).getAttribute('aria-expanded')).toBe('false');
+    expect(screen.queryByRole('textbox', { name: 'Исходный текст распознавания' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Скопировать' })).toHaveProperty('disabled', false);
+    openSettings();
+    expect(screen.getByRole('combobox', { name: 'Профиль обработки текста' })).toHaveProperty('value', 'markdown');
+    expect(backend.saveSettings).not.toHaveBeenCalled();
   });
 
   it.each(['recording', 'transcribing', 'polishing', 'synthesizing', 'playing', 'no-key', 'unavailable'] as const)('does not allow retry in %s', async (state) => {
     await mount(makeSnapshot({
       phase: state === 'no-key' || state === 'unavailable' ? 'idle' : state,
-      can_retry_polish: state !== 'unavailable', has_api_key: state !== 'no-key',
-      last_raw_transcript: 'Текст',
+      has_pending_polish: state !== 'unavailable', can_retry_polish: state === 'no-key',
+      has_api_key: state !== 'no-key', last_transcript: null, last_raw_transcript: 'Текст',
     }));
     const button = screen.queryByRole('button', { name: 'Повторить обработку текста' });
     if (state === 'unavailable') expect(button).toBeNull();
-    else expect(button).toHaveProperty('disabled', true);
+    else {
+      expect(button).toHaveProperty('disabled', true);
+      fireEvent.click(button!);
+    }
     expect(backend.retryPolish).not.toHaveBeenCalled();
-    expect(screen.getByLabelText('Текст последней диктовки')).toHaveProperty('value', '');
+    if (state === 'unavailable' || state === 'polishing') expect(screen.getByRole('textbox', { name: 'Текст последней диктовки' })).toHaveProperty('value', '');
+    else expect(screen.queryByRole('textbox', { name: 'Текст последней диктовки' })).toBeNull();
   });
 
   it.each(['recording', 'transcribing', 'polishing', 'synthesizing', 'playing'] as const)('locks custom profile editing during %s', async (phase) => {
     const snapshot = makeSnapshot({ phase });
     snapshot.settings.polish = { ...snapshot.settings.polish, profile_id: 'custom-test',
       custom_profiles: [{ id: 'custom-test', name: 'Профиль', mode: 'llm', instruction: 'Инструкция', prefix: '', suffix: '' }] };
-    await mount(snapshot);
+    await mountSettings(snapshot);
     for (const label of ['Название профиля', 'Инструкция профиля']) {
       expect(screen.getByLabelText(label).matches(':disabled')).toBe(true);
     }
@@ -430,11 +477,17 @@ describe('polishing interface', () => {
   });
 
   it('reports retry errors without replacing the last successful text', async () => {
-    await mount(makeSnapshot({ can_retry_polish: true, last_transcript: 'Успех', last_raw_transcript: 'Исходный' }));
+    await mount(makeSnapshot({
+      can_retry_polish: true, last_transcript: null,
+      previous_transcript: 'Успех', last_raw_transcript: 'Исходный',
+    }));
     backend.retryPolish.mockRejectedValue(new Error('OpenAI недоступен'));
     fireEvent.click(screen.getByRole('button', { name: 'Повторить обработку текста' }));
     await screen.findByText(/Не удалось повторить обработку текста: OpenAI недоступен/);
-    expect(screen.getByLabelText('Текст последней диктовки')).toHaveProperty('value', 'Успех');
+    expect(screen.getByRole('textbox', { name: 'Исходный текст распознавания' })).toHaveProperty('value', 'Исходный');
+    expect(screen.queryByRole('textbox', { name: 'Текст последней диктовки' })).toBeNull();
+    fireEvent.click(screen.getByText('Предыдущий успешный результат', { selector: 'summary' }));
+    expect(screen.getByRole('textbox', { name: 'Предыдущий успешный текст' })).toHaveProperty('value', 'Успех');
   });
 });
 
@@ -450,6 +503,7 @@ describe('Russian dictation interface', () => {
     expect(screen.getByRole('timer').textContent).toBe('00:07');
     expect(screen.getByText('01:05')).toBeTruthy();
     expect(screen.getByText('01:01:01')).toBeTruthy();
+    openSettings();
     expect(screen.getByRole('option', { name: 'USB микрофон — по умолчанию' })).toBeTruthy();
     expect(screen.getAllByRole('option').filter((option) => option.parentElement?.id === 'model')).toHaveLength(MODELS.length + 1);
     expect(screen.getByRole('option', { name: 'GPT Transcribe — рекомендован OpenAI' })).toBeTruthy();
@@ -523,10 +577,12 @@ describe('Russian dictation interface', () => {
       phase,
       statistics: { last_recording_seconds: 5, total_recording_seconds: 5, recordings: 1 },
     }));
+    openSettings();
     for (const label of ['Микрофон', 'Модель', 'Сочетание клавиш', 'TTS-модель', 'Голос', 'Сочетание клавиш озвучивания', 'Новый ключ', 'Профиль обработки текста', 'Модель обработки текста', 'Уровень рассуждения']) {
       expect((screen.getByLabelText(label) as HTMLInputElement).matches(':disabled')).toBe(true);
     }
     expect(screen.getByRole('button', { name: 'Сбросить' })).toHaveProperty('disabled', true);
+    openHome();
     expect(Boolean(screen.queryByRole('button', { name: 'Отменить запись' }))).toBe(phase === 'recording');
     if (phase === 'transcribing' || phase === 'polishing') {
       expect(screen.getByRole('button', { name: 'Обработка…' })).toHaveProperty('disabled', true);
@@ -554,7 +610,7 @@ describe('Russian dictation interface', () => {
 
   it('saves normalized settings and maps the default microphone to null', async () => {
     const original = makeSnapshot({ settings: { ...makeSnapshot().settings, input_device: 'mic-1' } });
-    await mount(original);
+    await mountSettings(original);
     const settings: Settings = {
       ...original.settings,
       shortcut: 'Control+Super+R', model: 'whisper-1', input_device: null, auto_paste: false,
@@ -575,7 +631,7 @@ describe('Russian dictation interface', () => {
       'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/605.1.15',
     );
     const initial = makeSnapshot({ settings: { ...makeSnapshot().settings, paste_shortcut: 'ctrl_shift_v' } });
-    await mount(initial);
+    await mountSettings(initial);
     expect(screen.queryByLabelText('Сочетание для вставки')).toBeNull();
     expect(screen.getByText(/для Cmd\+V/)).toBeTruthy();
     const autoPaste = screen.getByLabelText('Автоматически вставлять результат');
@@ -589,6 +645,7 @@ describe('Russian dictation interface', () => {
     fireEvent.click(autoPaste);
     fireEvent.click(screen.getByRole('button', { name: 'Сохранить настройки' }));
     await waitFor(() => expect(backend.saveSettings).toHaveBeenCalledWith(saved.settings));
+    openHome();
     expect(screen.getByText(/автоматически вставляется в активное поле/)).toBeTruthy();
   });
 
@@ -596,7 +653,7 @@ describe('Russian dictation interface', () => {
     // Wayland webviews can also identify themselves as X11: use the backend mode.
     vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (X11; Linux x86_64)');
     const initial = makeSnapshot({ hotkey_mode });
-    await mount(initial);
+    await mountSettings(initial);
     const autoPaste = screen.getByLabelText('Автоматически вставлять результат');
     expect(autoPaste).toHaveProperty('checked', false);
     const help = document.getElementById(autoPaste.getAttribute('aria-describedby')!)!;
@@ -618,13 +675,17 @@ describe('Russian dictation interface', () => {
     fireEvent.click(autoPaste);
     expect(pasteShortcut.matches(':disabled')).toBe(false);
     // Transcript guidance follows saved settings, not an unsaved draft.
+    openHome();
     expect(screen.getByText(/Текст копируется в буфер обмена —/)).toBeTruthy();
+    openSettings();
     const saved = { ...initial, settings: { ...initial.settings, auto_paste: true } };
     backend.saveSettings.mockResolvedValue(saved);
     backend.getSnapshot.mockResolvedValue(saved);
     fireEvent.click(screen.getByRole('button', { name: 'Сохранить настройки' }));
     await waitFor(() => expect(backend.saveSettings).toHaveBeenCalledExactlyOnceWith(saved.settings));
+    openHome();
     await screen.findByText(/автоматически вставляется в активное поле на момент завершения/);
+    openSettings();
     await waitFor(() => expect(autoPaste.matches(':disabled')).toBe(false));
     // Treat disabling as a separate save, outside the double-click guard.
     vi.spyOn(performance, 'now').mockReturnValue(performance.now() + 1000);
@@ -633,13 +694,14 @@ describe('Russian dictation interface', () => {
     fireEvent.click(autoPaste);
     fireEvent.click(screen.getByRole('button', { name: 'Сохранить настройки' }));
     await waitFor(() => expect(backend.saveSettings).toHaveBeenLastCalledWith(initial.settings));
+    openHome();
     await screen.findByText(/Текст копируется в буфер обмена —/);
   });
 
   it.each(['ctrl_v', 'ctrl_shift_v'] as const)('loads, edits and saves Linux paste chord %s without losing it when disabled', async (paste_shortcut) => {
     vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (X11; Linux x86_64)');
     const initial = makeSnapshot({ settings: { ...makeSnapshot().settings, auto_paste: true, paste_shortcut } });
-    await mount(initial);
+    await mountSettings(initial);
     const select = screen.getByLabelText('Сочетание для вставки');
     const save = screen.getByRole('button', { name: 'Сохранить настройки' });
     expect(select).toHaveProperty('value', paste_shortcut);
@@ -669,21 +731,22 @@ describe('Russian dictation interface', () => {
 
   it.each(['recording', 'transcribing', 'polishing'] as const)('locks Linux auto-paste during %s', async (phase) => {
     vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (X11; Linux x86_64)');
-    await mount(makeSnapshot({ phase, settings: { ...makeSnapshot().settings, auto_paste: true } }));
+    await mountSettings(makeSnapshot({ phase, settings: { ...makeSnapshot().settings, auto_paste: true } }));
     expect(screen.getByLabelText('Автоматически вставлять результат').matches(':disabled')).toBe(true);
     expect(screen.getByLabelText('Сочетание для вставки').matches(':disabled')).toBe(true);
   });
 
   it.each(['Mozilla/5.0 (Windows NT 10.0; Win64; x64)', 'Mozilla/5.0 (Linux; Android 14)'])('hides auto-paste on unsupported platform %s', async (userAgent) => {
     vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(userAgent);
-    await mount(makeSnapshot({ settings: { ...makeSnapshot().settings, auto_paste: true } }));
+    await mountSettings(makeSnapshot({ settings: { ...makeSnapshot().settings, auto_paste: true } }));
     expect(screen.queryByLabelText('Автоматически вставлять результат')).toBeNull();
     expect(screen.queryByLabelText('Сочетание для вставки')).toBeNull();
+    openHome();
     expect(screen.getByText(/Текст копируется в буфер обмена —/)).toBeTruthy();
   });
 
   it('saves the password transiently and clears it as soon as the backend accepts it', async () => {
-    await mount(makeSnapshot({ has_api_key: false }));
+    await mountSettings(makeSnapshot({ has_api_key: false }));
     const input = screen.getByLabelText('Ключ OpenAI');
     const saving = deferred<Snapshot>();
     const reconciliation = deferred<Snapshot>();
@@ -702,7 +765,7 @@ describe('Russian dictation interface', () => {
   });
 
   it('deletes the key and clears any unsaved password', async () => {
-    await mount();
+    await mountSettings();
     const deleted = makeSnapshot({ has_api_key: false });
     backend.deleteApiKey.mockResolvedValue(deleted);
     backend.getSnapshot.mockResolvedValue(deleted);
@@ -711,6 +774,7 @@ describe('Russian dictation interface', () => {
     await screen.findByText('API-ключ удалён. Для новой записи потребуется сохранить ключ.');
     expect(backend.deleteApiKey).toHaveBeenCalledOnce();
     expect(screen.getByLabelText('Ключ OpenAI')).toHaveProperty('value', '');
+    openHome();
     expect(screen.getByRole('button', { name: 'Начать запись' })).toHaveProperty('disabled', true);
   });
 
@@ -718,12 +782,14 @@ describe('Russian dictation interface', () => {
     await mount(makeSnapshot({ last_transcript: 'Готовый текст' }));
     backend.copyLastTranscript.mockResolvedValue(undefined);
     fireEvent.click(screen.getByRole('button', { name: 'Скопировать' }));
-    await screen.findByText('Текст скопирован в буфер обмена.');
+    const feedback = await screen.findByText('Скопировано');
+    expect(screen.getByRole('region', { name: 'Последний результат' }).contains(feedback)).toBe(true);
+    expect(document.querySelector('.notifications')?.textContent).not.toContain('Скопировано');
     expect(backend.copyLastTranscript).toHaveBeenCalledOnce();
   });
 
   it('requires confirmation before resetting statistics', async () => {
-    await mount(makeSnapshot({ statistics: { last_recording_seconds: 12, total_recording_seconds: 12, recordings: 1 } }));
+    await mountSettings(makeSnapshot({ statistics: { last_recording_seconds: 12, total_recording_seconds: 12, recordings: 1 } }));
     backend.resetStatistics.mockResolvedValue(makeSnapshot());
     fireEvent.click(screen.getByRole('button', { name: 'Сбросить' }));
     expect(backend.resetStatistics).not.toHaveBeenCalled();
@@ -733,20 +799,21 @@ describe('Russian dictation interface', () => {
   });
 
   it('shows local validation and backend errors without hiding either', async () => {
-    await mount(makeSnapshot({ last_error: 'Микрофон отключён' }));
+    await mountSettings(makeSnapshot({ last_error: 'Микрофон отключён' }));
     fireEvent.change(screen.getByLabelText('Сочетание клавиш'), { target: { value: 'Super+' } });
     fireEvent.click(screen.getByRole('button', { name: 'Сохранить настройки' }));
     expect(backend.saveSettings).not.toHaveBeenCalled();
     expect(screen.getByText('Проверьте настройки')).toBeTruthy();
     expect(screen.getByText('Микрофон отключён')).toBeTruthy();
     backend.toggleRecording.mockRejectedValue(new Error('Нет разрешения на микрофон'));
+    openHome();
     fireEvent.click(screen.getByRole('button', { name: 'Начать запись' }));
     await screen.findByText(/Не удалось начать или остановить запись: Нет разрешения на микрофон/);
   });
 
   it('keeps an unavailable saved microphone selectable and exposes device-list failures', async () => {
     backend.listInputDevices.mockRejectedValue('Нет доступа к устройствам');
-    await mount(makeSnapshot({ settings: { ...makeSnapshot().settings, input_device: 'missing-mic' } }));
+    await mountSettings(makeSnapshot({ settings: { ...makeSnapshot().settings, input_device: 'missing-mic' } }));
     expect(screen.getByLabelText('Микрофон')).toHaveProperty('value', 'missing-mic');
     expect(screen.getByRole('option', { name: 'Сохранённый микрофон (нет в списке)' })).toBeTruthy();
     await screen.findByText(/Не удалось получить микрофоны: Нет доступа к устройствам/);
@@ -756,7 +823,7 @@ describe('Russian dictation interface', () => {
     vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (X11; Linux x86_64)');
     const command = '"/opt/STT Simple/stt-simple" --toggle';
     const ttsCommand = '"/opt/STT Simple/stt-simple" --toggle-tts';
-    await mount(makeSnapshot({ hotkey_available: false, hotkey_mode: 'system', hotkey_command: command,
+    await mountSettings(makeSnapshot({ hotkey_available: false, hotkey_mode: 'system', hotkey_command: command,
       hotkey_message: 'Системное сочетание отсутствует.', tts_hotkey_available: false,
       tts_hotkey_command: ttsCommand, tts_hotkey_message: 'Назначьте озвучивание вручную. TTS на Linux не проверен.' }));
     expect(screen.getByText(command)).toBeTruthy();
@@ -779,44 +846,49 @@ describe('Russian dictation interface', () => {
     fireEvent.click(save);
     await screen.findByText('Настройки сохранены.');
     expect(backend.saveSettings).toHaveBeenCalledWith(saved.settings);
+    openHome();
     expect(screen.getByText(/· настроено в GNOME/, { selector: '.shortcut-hint span' })).toBeTruthy();
   });
 
   it('does not show Wayland instructions on Linux with native shortcut registration', async () => {
     vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (X11; Linux x86_64)');
-    await mount(makeSnapshot({ hotkey_mode: 'native', hotkey_available: true }));
+    await mountSettings(makeSnapshot({ hotkey_mode: 'native', hotkey_available: true }));
     expect(screen.queryByRole('heading', { name: 'Системное сочетание клавиш' })).toBeNull();
     expect(screen.queryByText(/настроено в GNOME/)).toBeNull();
+    openHome();
     expect(screen.getAllByText(/зарегистрировано/)).toHaveLength(2);
   });
 
   it('keeps the saved GNOME status and settings when applying another shortcut fails', async () => {
       const saved = makeSnapshot({ hotkey_mode: 'system', hotkey_available: true });
-      await mount(saved);
+      await mountSettings(saved);
       backend.saveSettings.mockRejectedValue('Сочетание уже назначено другому приложению.');
       fireEvent.change(screen.getByLabelText('Сочетание клавиш'), { target: { value: 'Super+E' } });
       fireEvent.click(screen.getByRole('button', { name: 'Сохранить настройки' }));
       await screen.findByText(/Не удалось сохранить настройки: Сочетание уже назначено/);
+      openHome();
       expect(screen.getByText(/· настроено в GNOME/, { selector: '.shortcut-hint span' })).toBeTruthy();
       expect(screen.getByText('Super+R', { selector: '.shortcut-hint kbd' })).toBeTruthy();
+      openSettings();
       expect(screen.getByLabelText('Сочетание клавиш')).toHaveProperty('value', 'Super+E');
     });
 
     it('disables system shortcut application while recording', async () => {
-      await mount(makeSnapshot({ phase: 'recording', hotkey_mode: 'system', hotkey_available: false }));
+      await mountSettings(makeSnapshot({ phase: 'recording', hotkey_mode: 'system', hotkey_available: false }));
       expect(screen.getByRole('button', { name: 'Сохранить настройки' }).matches(':disabled')).toBe(true);
     });
 
     it('distinguishes a native registration failure from the Wayland system mode', async () => {
-    await mount(makeSnapshot({ hotkey_mode: 'native', hotkey_available: false, hotkey_message: 'Сочетание занято.' }));
-    expect(screen.getByText(/не удалось зарегистрировать/)).toBeTruthy();
+    await mountSettings(makeSnapshot({ hotkey_mode: 'native', hotkey_available: false, hotkey_message: 'Сочетание занято.' }));
     expect(screen.getByText('Сочетание занято.')).toBeTruthy();
+    openHome();
+    expect(screen.getByText(/не удалось зарегистрировать/)).toBeTruthy();
     expect(screen.queryByText(/Команда для этой сборки/)).toBeNull();
   });
 
   it('allows choosing the current recommended transcription model', async () => {
     const settings = { ...makeSnapshot().settings, model: 'gpt-transcribe' };
-    await mount();
+    await mountSettings();
     backend.saveSettings.mockResolvedValue(makeSnapshot({ settings }));
     fireEvent.change(screen.getByLabelText('Модель'), { target: { value: 'gpt-transcribe' } });
     fireEvent.click(screen.getByRole('button', { name: 'Сохранить настройки' }));
@@ -826,7 +898,7 @@ describe('Russian dictation interface', () => {
 
   it('allows a custom model ID not present in the suggestions', async () => {
     const settings = { ...makeSnapshot().settings, model: 'gpt-transcribe-future-snapshot' };
-    await mount();
+    await mountSettings();
     backend.saveSettings.mockResolvedValue(makeSnapshot({ settings }));
     fireEvent.change(screen.getByLabelText('Модель'), { target: { value: '__custom__' } });
     fireEvent.change(screen.getByLabelText('ID модели OpenAI'), { target: { value: settings.model } });
@@ -842,7 +914,7 @@ describe('Russian dictation interface', () => {
       tts_model: 'future-tts-snapshot',
       tts_voice: 'voice_1.0:preview',
     };
-    await mount();
+    await mountSettings();
     backend.saveSettings.mockResolvedValue(makeSnapshot({ settings }));
     fireEvent.change(screen.getByLabelText('TTS-модель'), { target: { value: '__custom__' } });
     fireEvent.change(screen.getByLabelText('ID TTS-модели OpenAI'), { target: { value: settings.tts_model } });
@@ -856,7 +928,7 @@ describe('Russian dictation interface', () => {
   it('preserves a combined TTS, polishing and Linux paste draft across backend settings events and saves every field', async () => {
     vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (X11; Linux x86_64)');
     const initial = makeSnapshot();
-    await mount(initial);
+    await mountSettings(initial);
     fireEvent.change(screen.getByLabelText('Голос'), { target: { value: 'cedar' } });
     fireEvent.change(screen.getByLabelText('Сочетание клавиш озвучивания'), { target: { value: ' Control + Alt + A ' } });
     fireEvent.change(screen.getByLabelText('Профиль обработки текста'), { target: { value: 'markdown' } });
@@ -887,7 +959,7 @@ describe('Russian dictation interface', () => {
   });
 
   it('rejects equivalent recording and speech shortcuts before invoking the backend', async () => {
-    await mount();
+    await mountSettings();
     fireEvent.change(screen.getByLabelText('Сочетание клавиш'), { target: { value: 'Super+Control+A' } });
     fireEvent.click(screen.getByRole('button', { name: 'Сохранить настройки' }));
     expect(await screen.findByText(/не должны совпадать/)).toBeTruthy();
@@ -896,7 +968,7 @@ describe('Russian dictation interface', () => {
 
   it('preserves an existing custom model while changing another setting', async () => {
     const saved = { ...makeSnapshot().settings, model: 'custom-transcription-model' };
-    await mount(makeSnapshot({ settings: saved }));
+    await mountSettings(makeSnapshot({ settings: saved }));
     expect(screen.getByLabelText('ID модели OpenAI')).toHaveProperty('value', saved.model);
     const settings = { ...saved, shortcut: 'Control+Alt+R' };
     backend.saveSettings.mockResolvedValue(makeSnapshot({ settings }));
@@ -904,6 +976,478 @@ describe('Russian dictation interface', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Сохранить настройки' }));
     await screen.findByText('Настройки сохранены.');
     expect(backend.saveSettings).toHaveBeenCalledWith(settings);
+  });
+});
+
+describe('settings page navigation', () => {
+  it('starts on home, keeps both pages mounted and exposes all settings groups and anchors together', async () => {
+    await mount(makeSnapshot({ last_transcript: 'Результат' }));
+    const result = screen.getByRole('region', { name: 'Последний результат' });
+    const home = result.parentElement!;
+    const settings = document.getElementById('settings-page')!;
+    const navigation = screen.getByRole('button', { name: 'Настройки' });
+    expect(home).toHaveProperty('hidden', false);
+    expect(settings).toHaveProperty('hidden', true);
+    expect(navigation.getAttribute('aria-expanded')).toBe('false');
+    expect(navigation.getAttribute('aria-controls')).toBe(settings.id);
+    expect(screen.queryByRole('navigation', { name: 'Разделы настроек' })).toBeNull();
+    expect(screen.queryByRole('combobox', { name: 'Микрофон' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Сохранить ключ' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Сбросить' })).toBeNull();
+
+    openSettings();
+    expect(home).toHaveProperty('hidden', true);
+    expect(settings).toHaveProperty('hidden', false);
+    expect(navigation.getAttribute('aria-expanded')).toBe('true');
+    expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Настройки приложения' }));
+    expect(screen.queryByRole('button', { name: 'Начать запись' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Озвучить буфер' })).toBeNull();
+    expect(screen.queryByRole('region', { name: 'Последний результат' })).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'API-ключ OpenAI' })).toBeNull();
+    const nav = within(screen.getByRole('navigation', { name: 'Разделы настроек' }));
+    for (const [name, href] of [
+      ['Диктовка', '#dictation-settings'], ['Озвучивание', '#tts-settings-heading'],
+      ['Обработка текста', '#polish-settings'], ['Подключение', '#key-heading'],
+    ]) {
+      expect(screen.getByRole('heading', { name })).toBeTruthy();
+      expect(nav.getByRole('link', { name }).getAttribute('href')).toBe(href);
+      expect(settings.contains(document.getElementById(href!.slice(1)))).toBe(true);
+    }
+    for (const name of ['Микрофон', 'TTS-модель', 'Профиль обработки текста']) {
+      expect(screen.getByRole('combobox', { name })).toBeTruthy();
+    }
+    expect(screen.getByLabelText('Новый ключ')).toBeTruthy();
+    const microphone = screen.getByRole('combobox', { name: 'Микрофон' });
+    openHome();
+    expect(home).toHaveProperty('hidden', false);
+    expect(settings).toHaveProperty('hidden', true);
+    expect(screen.getByRole('region', { name: 'Последний результат' })).toBe(result);
+    expect(document.activeElement).toBe(navigation);
+    openSettings();
+    expect(screen.getByRole('combobox', { name: 'Микрофон' })).toBe(microphone);
+    expect(backend.subscribe).toHaveBeenCalledTimes(2);
+    expect(listeners.size).toBe(1);
+  });
+
+  it('preserves settings and password drafts across navigation and displays only saved microphone and profile summaries', async () => {
+    const initial = makeSnapshot();
+    initial.settings.input_device = 'mic-1';
+    initial.settings.polish.profile_id = 'polish';
+    await mount(initial);
+    const summary = () => within(screen.getByRole('region', { name: 'Диктовка' }));
+    expect(summary().getByText('USB микрофон')).toBeTruthy();
+    expect(summary().getByText('Минимальная правка')).toBeTruthy();
+    openSettings();
+    fireEvent.change(screen.getByRole('combobox', { name: 'Микрофон' }), { target: { value: 'mic-2' } });
+    fireEvent.change(screen.getByRole('combobox', { name: 'Профиль обработки текста' }), { target: { value: 'markdown' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Сочетание клавиш' }), { target: { value: 'Super+T' } });
+    fireEvent.change(screen.getByLabelText('Новый ключ'), { target: { value: 'unsaved-test-key' } });
+    expect(screen.getByText(/Есть несохранённые изменения. Черновик сохраняется/)).toBeTruthy();
+    openHome();
+    emit({ ...initial, recording_seconds: 2 });
+    expect(summary().getByText('USB микрофон')).toBeTruthy();
+    expect(summary().getByText('Минимальная правка')).toBeTruthy();
+    expect(summary().queryByText('Гарнитура')).toBeNull();
+    expect(summary().queryByText('Markdown')).toBeNull();
+    expect(screen.getByLabelText('Есть несохранённые изменения')).toBeTruthy();
+    expect(backend.saveSettings).not.toHaveBeenCalled();
+    expect(backend.setApiKey).not.toHaveBeenCalled();
+    openSettings();
+    expect(screen.getByRole('combobox', { name: 'Микрофон' })).toHaveProperty('value', 'mic-2');
+    expect(screen.getByRole('combobox', { name: 'Профиль обработки текста' })).toHaveProperty('value', 'markdown');
+    expect(screen.getByRole('textbox', { name: 'Сочетание клавиш' })).toHaveProperty('value', 'Super+T');
+    expect(screen.getByLabelText('Новый ключ')).toHaveProperty('value', 'unsaved-test-key');
+    const saved = makeSnapshot({ settings: {
+      ...initial.settings, input_device: 'mic-2', shortcut: 'Super+T',
+      polish: { ...initial.settings.polish, profile_id: 'markdown' },
+    } });
+    backend.saveSettings.mockResolvedValue(saved);
+    backend.getSnapshot.mockResolvedValue(saved);
+    fireEvent.click(screen.getByRole('button', { name: 'Сохранить настройки' }));
+    await screen.findByText('Настройки сохранены.');
+    expect(backend.saveSettings).toHaveBeenCalledExactlyOnceWith(saved.settings);
+    expect(screen.queryByLabelText('Есть несохранённые изменения')).toBeNull();
+    openHome();
+    expect(summary().getByText('Гарнитура')).toBeTruthy();
+    expect(summary().getByText('Markdown')).toBeTruthy();
+    expect(summary().queryByText('USB микрофон')).toBeNull();
+    expect(summary().queryByText('Минимальная правка')).toBeNull();
+  });
+
+  it('keeps statistics shared, but reset and its confirmation available only on settings', async () => {
+    const initial = makeSnapshot({ statistics: { last_recording_seconds: 65, total_recording_seconds: 3661, recordings: 3 } });
+    await mount(initial);
+    const statistics = screen.getByRole('region', { name: 'Статистика' });
+    expect(within(statistics).getByText('01:05')).toBeTruthy();
+    expect(within(statistics).getByText('01:01:01')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Сбросить' })).toBeNull();
+    openSettings();
+    expect(screen.getByRole('region', { name: 'Статистика' })).toBe(statistics);
+    fireEvent.click(screen.getByRole('button', { name: 'Сбросить' }));
+    expect(screen.getByRole('group', { name: 'Сбросить длительность и количество записей?' })).toBeTruthy();
+    openHome();
+    expect(screen.queryByRole('button', { name: 'Да, сбросить' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Сбросить' })).toBeNull();
+    expect(backend.resetStatistics).not.toHaveBeenCalled();
+    openSettings();
+    fireEvent.click(screen.getByRole('button', { name: 'Не сбрасывать' }));
+    expect(screen.queryByRole('button', { name: 'Да, сбросить' })).toBeNull();
+    expect(within(statistics).getByText('3')).toBeTruthy();
+    expect(backend.resetStatistics).not.toHaveBeenCalled();
+  });
+});
+
+describe('transcript result regressions', () => {
+  it('shows an empty read-only final field without disclosure, retry or previous result', async () => {
+    await mount();
+    const result = within(screen.getByRole('region', { name: 'Последний результат' }));
+    const final = result.getByRole('textbox', { name: 'Текст последней диктовки' });
+    expect(final).toHaveProperty('value', '');
+    expect(final).toHaveProperty('readOnly', true);
+    expect(final.getAttribute('placeholder')).toBe('Начните диктовку — здесь появится готовый текст.');
+    expect(result.getByRole('button', { name: 'Скопировать' })).toHaveProperty('disabled', true);
+    expect(result.queryByRole('button', { name: 'Показать исходный текст' })).toBeNull();
+    expect(result.queryByRole('button', { name: 'Скопировать исходный' })).toBeNull();
+    expect(result.queryByRole('button', { name: 'Повторить обработку текста' })).toBeNull();
+    expect(result.queryByText('Предыдущий успешный результат')).toBeNull();
+  });
+
+  it('shows final by default and toggles raw using an accessible disclosure without changing final', async () => {
+    await mount(makeSnapshot({ last_transcript: 'Итоговый текст', last_raw_transcript: 'исходная расшифровка' }));
+    const final = screen.getByRole('textbox', { name: 'Текст последней диктовки' });
+    const disclosure = screen.getByRole('button', { name: 'Показать исходный текст' });
+    const content = document.getElementById(disclosure.getAttribute('aria-controls')!)!;
+    expect(disclosure.getAttribute('aria-expanded')).toBe('false');
+    expect(content).toHaveProperty('hidden', true);
+    expect(screen.queryByRole('textbox', { name: 'Исходный текст распознавания' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Скопировать исходный' })).toBeNull();
+    fireEvent.click(disclosure);
+    expect(screen.getByRole('button', { name: 'Скрыть исходный текст' })).toBe(disclosure);
+    expect(disclosure.getAttribute('aria-expanded')).toBe('true');
+    expect(content).toHaveProperty('hidden', false);
+    expect(screen.getByRole('textbox', { name: 'Исходный текст распознавания' })).toHaveProperty('value', 'исходная расшифровка');
+    expect(screen.getByRole('textbox', { name: 'Исходный текст распознавания' })).toHaveProperty('readOnly', true);
+    expect(screen.getByRole('button', { name: 'Скопировать исходный' })).toHaveProperty('disabled', false);
+    expect(final).toHaveProperty('value', 'Итоговый текст');
+    fireEvent.click(disclosure);
+    expect(disclosure.getAttribute('aria-expanded')).toBe('false');
+    expect(content).toHaveProperty('hidden', true);
+    expect(screen.queryByRole('textbox', { name: 'Исходный текст распознавания' })).toBeNull();
+    expect(final).toHaveProperty('value', 'Итоговый текст');
+  });
+
+  it.each([null, 'Старый успешный текст'])('automatically exposes failed raw and separates previous final (%j)', async (previous) => {
+    await mount(makeSnapshot({
+      last_transcript: null, previous_transcript: previous,
+      last_raw_transcript: 'Новая неудавшаяся расшифровка', can_retry_polish: true,
+    }));
+    const warning = screen.getByText('Обработка текста не завершена');
+    expect(warning.closest('[role="status"]')).toBeTruthy();
+    expect(screen.getByRole('textbox', { name: 'Исходный текст распознавания' })).toHaveProperty('value', 'Новая неудавшаяся расшифровка');
+    expect(document.getElementById('raw-result-content')).toHaveProperty('hidden', false);
+    expect(screen.queryByRole('button', { name: 'Показать исходный текст' })).toBeNull();
+    expect(screen.queryByRole('textbox', { name: 'Текст последней диктовки' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Скопировать' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Скопировать исходный' })).toHaveProperty('disabled', false);
+    if (previous) {
+      const disclosure = screen.getByText('Предыдущий успешный результат', { selector: 'summary' });
+      expect(disclosure.parentElement).toHaveProperty('open', false);
+      fireEvent.click(disclosure);
+      expect(disclosure.parentElement).toHaveProperty('open', true);
+      expect(screen.getByRole('textbox', { name: 'Предыдущий успешный текст' })).toHaveProperty('value', previous);
+      expect(screen.getByRole('textbox', { name: 'Предыдущий успешный текст' })).toHaveProperty('readOnly', true);
+      expect(screen.getByText('Это результат предыдущей записи, а не текущей расшифровки.')).toBeTruthy();
+    } else {
+      expect(screen.queryByText('Предыдущий успешный результат')).toBeNull();
+      expect(screen.queryByRole('textbox', { name: 'Предыдущий успешный текст' })).toBeNull();
+    }
+  });
+
+  it('preserves A as previous while B polishes, fails, survives TTS and succeeds after retry', async () => {
+    const a = makeSnapshot({ last_transcript: 'Итог A', last_raw_transcript: 'Расшифровка A' });
+    await mount(a);
+    expect(screen.getByRole('textbox', { name: 'Текст последней диктовки' })).toHaveProperty('value', 'Итог A');
+    expect(screen.queryByText('Предыдущий успешный результат')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Повторить обработку текста' })).toBeNull();
+
+    emit({ ...a, phase: 'recording' });
+    expect(screen.getByRole('textbox', { name: 'Текст последней диктовки' })).toHaveProperty('value', 'Итог A');
+    expect(screen.getByText('Показан предыдущий успешный результат. Новая запись ещё не распознана.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Скопировать' })).toHaveProperty('disabled', true);
+    expect(screen.queryByText('Предыдущий успешный результат')).toBeNull();
+    emit({ ...a, phase: 'transcribing' });
+    expect(screen.getByRole('textbox', { name: 'Текст последней диктовки' })).toHaveProperty('value', 'Итог A');
+    expect(screen.getByText('Распознаём новую запись…')).toBeTruthy();
+
+    const polishing = makeSnapshot({
+      phase: 'polishing', last_transcript: null, previous_transcript: 'Итог A',
+      last_raw_transcript: 'Расшифровка B', has_pending_polish: true, can_retry_polish: false,
+    });
+    emit(polishing);
+    expect(screen.getByRole('textbox', { name: 'Текст последней диктовки' })).toHaveProperty('value', '');
+    expect(screen.getByRole('button', { name: 'Скопировать' })).toHaveProperty('disabled', true);
+    expect(screen.getByText('Обрабатываем исходную расшифровку…')).toBeTruthy();
+    expect(screen.queryByText('Обработка текста не завершена')).toBeNull();
+    expect(screen.getByRole('textbox', { name: 'Исходный текст распознавания' })).toHaveProperty('value', 'Расшифровка B');
+    expect(document.getElementById('raw-result-content')).toHaveProperty('hidden', false);
+    expect(screen.queryByRole('button', { name: 'Показать исходный текст' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Скопировать исходный' })).toHaveProperty('disabled', true);
+    expect(screen.getByRole('button', { name: 'Повторить обработку текста' })).toHaveProperty('disabled', true);
+    const previous = screen.getByText('Предыдущий успешный результат', { selector: 'summary' });
+    expect(previous.parentElement).toHaveProperty('open', false);
+    fireEvent.click(previous);
+    expect(screen.getByRole('textbox', { name: 'Предыдущий успешный текст' })).toHaveProperty('value', 'Итог A');
+
+    const failed: Snapshot = {
+      ...polishing, phase: 'idle', can_retry_polish: true, last_error: 'Обработка B не удалась',
+    };
+    emit(failed);
+    expect(screen.getByText('Обработка текста не завершена')).toBeTruthy();
+    expect(screen.getByText('Обработка B не удалась')).toBeTruthy();
+    expect(screen.queryByRole('textbox', { name: 'Текст последней диктовки' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Скопировать' })).toBeNull();
+    expect(screen.getByRole('textbox', { name: 'Исходный текст распознавания' })).toHaveProperty('value', 'Расшифровка B');
+    expect(screen.getByRole('textbox', { name: 'Предыдущий успешный текст' })).toHaveProperty('value', 'Итог A');
+    expect(screen.getByRole('button', { name: 'Скопировать исходный' })).toHaveProperty('disabled', false);
+    expect(screen.getByRole('button', { name: 'Повторить обработку текста' })).toHaveProperty('disabled', false);
+
+    for (const phase of ['synthesizing', 'playing'] as const) {
+      emit({ ...failed, phase, can_retry_polish: false });
+      expect(screen.getByText('Обработка текста не завершена')).toBeTruthy();
+      expect(screen.getByRole('textbox', { name: 'Исходный текст распознавания' })).toHaveProperty('value', 'Расшифровка B');
+      expect(screen.getByRole('textbox', { name: 'Предыдущий успешный текст' })).toHaveProperty('value', 'Итог A');
+      expect(screen.queryByRole('textbox', { name: 'Текст последней диктовки' })).toBeNull();
+      expect(document.getElementById('raw-result-content')).toHaveProperty('hidden', false);
+      for (const name of ['Скопировать исходный', 'Повторить обработку текста']) {
+        const button = screen.getByRole('button', { name });
+        expect(button).toHaveProperty('disabled', true);
+        fireEvent.click(button);
+      }
+      expect(backend.copyLastRawTranscript).not.toHaveBeenCalled();
+      expect(backend.retryPolish).not.toHaveBeenCalled();
+    }
+
+    emit(failed);
+    const retry = deferred<void>();
+    backend.retryPolish.mockReturnValue(retry.promise);
+    fireEvent.click(screen.getByRole('button', { name: 'Повторить обработку текста' }));
+    expect(backend.retryPolish).toHaveBeenCalledExactlyOnceWith();
+    emit(polishing);
+    expect(screen.queryByText('Обработка текста не завершена')).toBeNull();
+    expect(screen.getByText('Обрабатываем исходную расшифровку…')).toBeTruthy();
+    expect(screen.getByRole('textbox', { name: 'Текст последней диктовки' })).toHaveProperty('value', '');
+    expect(screen.getByRole('textbox', { name: 'Исходный текст распознавания' })).toHaveProperty('value', 'Расшифровка B');
+    expect(document.getElementById('raw-result-content')).toHaveProperty('hidden', false);
+    expect(screen.queryByRole('button', { name: 'Показать исходный текст' })).toBeNull();
+    expect(screen.getByRole('textbox', { name: 'Предыдущий успешный текст' })).toHaveProperty('value', 'Итог A');
+    expect(screen.getByRole('button', { name: 'Повтор…' })).toHaveProperty('disabled', true);
+    expect(screen.getByRole('button', { name: 'Скопировать исходный' })).toHaveProperty('disabled', true);
+
+    const success: Snapshot = {
+      ...polishing, phase: 'idle', last_transcript: 'Итог B', previous_transcript: null,
+      has_pending_polish: false, can_retry_polish: false, last_error: null,
+    };
+    backend.getSnapshot.mockResolvedValue(success);
+    await act(async () => retry.resolve());
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Скопировать' })).toHaveProperty('disabled', false));
+    expect(screen.getByRole('textbox', { name: 'Текст последней диктовки' })).toHaveProperty('value', 'Итог B');
+    expect(screen.queryByText('Предыдущий успешный результат')).toBeNull();
+    expect(screen.queryByText('Обработка текста не завершена')).toBeNull();
+    expect(screen.queryByRole('button', { name: /Повторить обработку текста|Повтор…/ })).toBeNull();
+    expect(screen.queryByRole('textbox', { name: 'Исходный текст распознавания' })).toBeNull();
+    const disclosure = screen.getByRole('button', { name: 'Показать исходный текст' });
+    expect(disclosure.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(disclosure);
+    expect(screen.getByRole('textbox', { name: 'Исходный текст распознавания' })).toHaveProperty('value', 'Расшифровка B');
+    expect(backend.copyLastTranscript).not.toHaveBeenCalled();
+    expect(backend.copyLastRawTranscript).not.toHaveBeenCalled();
+    expect(backend.saveSettings).not.toHaveBeenCalled();
+  });
+
+  it('copies raw with its own backend command and local feedback, locking through reconciliation', async () => {
+    const snapshot = makeSnapshot({ last_transcript: 'Итог', last_raw_transcript: 'Исходный' });
+    await mount(snapshot);
+    fireEvent.click(screen.getByRole('button', { name: 'Показать исходный текст' }));
+    const copying = deferred<void>();
+    const reconciliation = deferred<Snapshot>();
+    backend.copyLastRawTranscript.mockReturnValue(copying.promise);
+    backend.getSnapshot.mockReturnValue(reconciliation.promise);
+    const copy = screen.getByRole('button', { name: 'Скопировать исходный' });
+    act(() => { fireEvent.click(copy); fireEvent.click(copy); });
+    expect(backend.copyLastRawTranscript).toHaveBeenCalledExactlyOnceWith();
+    expect(screen.getByRole('button', { name: 'Копирование исходного…' })).toHaveProperty('disabled', true);
+    expect(screen.getByRole('button', { name: 'Скопировать' })).toHaveProperty('disabled', true);
+    await act(async () => copying.resolve());
+    expect(copy).toHaveProperty('disabled', true);
+    expect(screen.queryByText('Исходный текст скопирован')).toBeNull();
+    await act(async () => reconciliation.resolve(snapshot));
+    const feedback = await screen.findByText('Исходный текст скопирован');
+    expect(screen.getByRole('region', { name: 'Последний результат' }).contains(feedback)).toBe(true);
+    expect(document.querySelector('.notifications')?.textContent).not.toContain('Исходный текст скопирован');
+    expect(copy).toHaveProperty('disabled', false);
+    expect(screen.getByRole('textbox', { name: 'Текст последней диктовки' })).toHaveProperty('value', 'Итог');
+    expect(backend.copyLastTranscript).not.toHaveBeenCalled();
+    expect(backend.retryPolish).not.toHaveBeenCalled();
+  });
+
+  it('allows copying failed raw without an API key while preserving the previous successful result', async () => {
+    await mount(makeSnapshot({
+      has_api_key: false, can_retry_polish: true,
+      last_transcript: null, previous_transcript: 'Предыдущий итог', last_raw_transcript: 'Текущая расшифровка',
+    }));
+    backend.copyLastRawTranscript.mockResolvedValue(undefined);
+    const copy = screen.getByRole('button', { name: 'Скопировать исходный' });
+    expect(copy).toHaveProperty('disabled', false);
+    expect(screen.getByRole('button', { name: 'Повторить обработку текста' })).toHaveProperty('disabled', true);
+    fireEvent.click(copy);
+    await screen.findByText('Исходный текст скопирован');
+    expect(backend.copyLastRawTranscript).toHaveBeenCalledExactlyOnceWith();
+    expect(backend.copyLastTranscript).not.toHaveBeenCalled();
+    expect(screen.queryByRole('textbox', { name: 'Текст последней диктовки' })).toBeNull();
+    fireEvent.click(screen.getByText('Предыдущий успешный результат', { selector: 'summary' }));
+    expect(screen.getByRole('textbox', { name: 'Предыдущий успешный текст' })).toHaveProperty('value', 'Предыдущий итог');
+    expect(screen.getByRole('textbox', { name: 'Исходный текст распознавания' })).toHaveProperty('value', 'Текущая расшифровка');
+  });
+
+  it('reports raw clipboard errors without success feedback or replacing either text', async () => {
+    await mount(makeSnapshot({ last_transcript: 'Итог', last_raw_transcript: 'Исходный' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Показать исходный текст' }));
+    backend.copyLastRawTranscript.mockRejectedValue(new Error('Буфер недоступен'));
+    fireEvent.click(screen.getByRole('button', { name: 'Скопировать исходный' }));
+    await screen.findByText(/Не удалось скопировать исходный текст: Буфер недоступен/);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Скопировать исходный' })).toHaveProperty('disabled', false));
+    expect(backend.copyLastRawTranscript).toHaveBeenCalledExactlyOnceWith();
+    expect(backend.copyLastTranscript).not.toHaveBeenCalled();
+    expect(screen.queryByText('Исходный текст скопирован')).toBeNull();
+    expect(screen.queryByText('Скопировано')).toBeNull();
+    expect(screen.getByRole('textbox', { name: 'Исходный текст распознавания' })).toHaveProperty('value', 'Исходный');
+    expect(screen.getByRole('textbox', { name: 'Текст последней диктовки' })).toHaveProperty('value', 'Итог');
+  });
+
+  it.each(['recording', 'transcribing', 'polishing', 'synthesizing', 'playing'] as const)('guards raw copy during %s and restores it at idle', async (phase) => {
+    const idle = makeSnapshot({ last_raw_transcript: 'Исходный' });
+    await mount(idle);
+    fireEvent.click(screen.getByRole('button', { name: 'Показать исходный текст' }));
+    const copy = screen.getByRole('button', { name: 'Скопировать исходный' });
+    expect(copy).toHaveProperty('disabled', false);
+    emit({ ...idle, phase });
+    expect(copy).toHaveProperty('disabled', true);
+    fireEvent.click(copy);
+    expect(backend.copyLastRawTranscript).not.toHaveBeenCalled();
+    emit(idle);
+    expect(copy).toHaveProperty('disabled', false);
+  });
+
+  it.each(['final', 'raw'] as const)('clears local %s copy feedback when new text arrives', async (kind) => {
+    const snapshot = makeSnapshot({ last_transcript: 'Первый итог', last_raw_transcript: 'Первый исходный' });
+    await mount(snapshot);
+    backend.copyLastTranscript.mockResolvedValue(undefined);
+    backend.copyLastRawTranscript.mockResolvedValue(undefined);
+    fireEvent.click(screen.getByRole('button', { name: 'Показать исходный текст' }));
+    fireEvent.click(screen.getByRole('button', { name: kind === 'final' ? 'Скопировать' : 'Скопировать исходный' }));
+    await screen.findByText(kind === 'final' ? 'Скопировано' : 'Исходный текст скопирован');
+    emit({ ...snapshot, last_transcript: 'Второй итог', last_raw_transcript: 'Второй исходный' });
+    expect(screen.queryByText('Скопировано')).toBeNull();
+    expect(screen.queryByText('Исходный текст скопирован')).toBeNull();
+    expect(screen.getByRole('textbox', { name: 'Текст последней диктовки' })).toHaveProperty('value', 'Второй итог');
+    expect(screen.getByRole('textbox', { name: 'Исходный текст распознавания' })).toHaveProperty('value', 'Второй исходный');
+  });
+
+  it.each([
+    { kind: 'final', during: 'command' },
+    { kind: 'raw', during: 'command' },
+    { kind: 'final', during: 'reconciliation' },
+    { kind: 'raw', during: 'reconciliation' },
+  ] as const)('does not revive stale $kind copy feedback when a new result arrives during $during', async ({ kind, during }) => {
+    const initial = makeSnapshot({ last_transcript: 'Итог A', last_raw_transcript: 'Расшифровка A' });
+    const newer = makeSnapshot({ last_transcript: 'Итог B', last_raw_transcript: 'Расшифровка B' });
+    await mount(initial);
+    fireEvent.click(screen.getByRole('button', { name: 'Показать исходный текст' }));
+    const copying = deferred<void>();
+    const reconciliation = deferred<Snapshot>();
+    const command = kind === 'final' ? backend.copyLastTranscript : backend.copyLastRawTranscript;
+    const name = kind === 'final' ? 'Скопировать' : 'Скопировать исходный';
+    command.mockReturnValue(copying.promise);
+    backend.getSnapshot.mockReturnValue(reconciliation.promise);
+    const reads = backend.getSnapshot.mock.calls.length;
+    fireEvent.click(screen.getByRole('button', { name }));
+    expect(command).toHaveBeenCalledExactlyOnceWith();
+    expect(screen.getByRole('button', { name: kind === 'final' ? 'Копирование…' : 'Копирование исходного…' })).toHaveProperty('disabled', true);
+
+    if (during === 'command') emit(newer);
+    await act(async () => copying.resolve());
+    expect(backend.getSnapshot).toHaveBeenCalledTimes(reads + 1);
+    if (during === 'reconciliation') emit(newer);
+    expect(screen.getByRole('textbox', { name: 'Текст последней диктовки' })).toHaveProperty('value', 'Итог B');
+    expect(screen.getByRole('textbox', { name: 'Исходный текст распознавания' })).toHaveProperty('value', 'Расшифровка B');
+    expect(screen.queryByText('Скопировано')).toBeNull();
+    expect(screen.queryByText('Исходный текст скопирован')).toBeNull();
+
+    // A newer event must also supersede an older reconciliation read already in flight.
+    await act(async () => reconciliation.resolve(during === 'reconciliation' ? initial : newer));
+    await waitFor(() => expect(screen.getByRole('button', { name })).toHaveProperty('disabled', false));
+    expect(screen.getByRole('textbox', { name: 'Текст последней диктовки' })).toHaveProperty('value', 'Итог B');
+    expect(screen.getByRole('textbox', { name: 'Исходный текст распознавания' })).toHaveProperty('value', 'Расшифровка B');
+    expect(screen.queryByText('Скопировано')).toBeNull();
+    expect(screen.queryByText('Исходный текст скопирован')).toBeNull();
+    expect(command).toHaveBeenCalledTimes(1);
+    expect(kind === 'final' ? backend.copyLastRawTranscript : backend.copyLastTranscript).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { kind: 'final', change: 'phase' },
+    { kind: 'raw', change: 'phase' },
+    { kind: 'final', change: 'connection' },
+    { kind: 'raw', change: 'connection' },
+  ] as const)('does not revive stale $kind copy feedback after a $change change without new text', async ({ kind, change }) => {
+    const snapshot = makeSnapshot({ last_transcript: 'Итог', last_raw_transcript: 'Исходный' });
+    const copying = deferred<boolean>();
+    const runAction = vi.fn().mockReturnValue(copying.promise);
+    const props = { snapshot, connected: true, pending: null, runAction, autoPaste: false, mac: false, linux: true };
+    const app = render(<TranscriptResult {...props} />);
+    if (kind === 'raw') fireEvent.click(screen.getByRole('button', { name: 'Показать исходный текст' }));
+    fireEvent.click(screen.getByRole('button', { name: kind === 'final' ? 'Скопировать' : 'Скопировать исходный' }));
+    expect(runAction).toHaveBeenCalledExactlyOnceWith(
+      kind === 'final' ? 'copy_last_transcript' : 'copy_last_raw_transcript',
+      kind === 'final' ? backend.copyLastTranscript : backend.copyLastRawTranscript,
+    );
+    app.rerender(<TranscriptResult {...props}
+      snapshot={change === 'phase' ? { ...snapshot, phase: 'synthesizing' } : snapshot}
+      connected={change !== 'connection'} />);
+    expect(screen.getByRole('button', { name: kind === 'final' ? 'Скопировать' : 'Скопировать исходный' })).toHaveProperty('disabled', true);
+    await act(async () => copying.resolve(true));
+    expect(screen.queryByText('Скопировано')).toBeNull();
+    expect(screen.queryByText('Исходный текст скопирован')).toBeNull();
+    expect(screen.getByRole('textbox', { name: 'Текст последней диктовки' })).toHaveProperty('value', 'Итог');
+    if (kind === 'raw') expect(screen.getByRole('textbox', { name: 'Исходный текст распознавания' })).toHaveProperty('value', 'Исходный');
+  });
+
+  it.each([
+    { connected: false, pending: null },
+    { connected: true, pending: 'save_settings' as Action },
+    { connected: true, pending: 'toggle_speech' as Action },
+    { connected: true, pending: 'copy_last_raw_transcript' as Action },
+  ])('guards result actions while connected=$connected pending=$pending', ({ connected, pending }) => {
+    const runAction = vi.fn();
+    const snapshot = makeSnapshot({ last_transcript: 'Итог', last_raw_transcript: 'Исходный' });
+    const props = { connected, pending, runAction, autoPaste: false, mac: false, linux: true };
+    const app = render(<TranscriptResult {...props} snapshot={snapshot} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Показать исходный текст' }));
+    for (const button of screen.getAllByRole('button', { name: /Скопировать|Копирование/ })) {
+      expect(button).toHaveProperty('disabled', true);
+      fireEvent.click(button);
+    }
+    app.rerender(<TranscriptResult {...props} snapshot={{
+      ...snapshot, last_transcript: null, previous_transcript: snapshot.last_transcript,
+      can_retry_polish: true, has_pending_polish: true,
+    }} />);
+    const retry = screen.getByRole('button', { name: 'Повторить обработку текста' });
+    expect(retry).toHaveProperty('disabled', true);
+    fireEvent.click(retry);
+    expect(runAction).not.toHaveBeenCalled();
+    expect(backend.copyLastRawTranscript).not.toHaveBeenCalled();
+    expect(backend.copyLastTranscript).not.toHaveBeenCalled();
+    expect(backend.retryPolish).not.toHaveBeenCalled();
   });
 });
 
