@@ -43,7 +43,9 @@ export interface Snapshot {
   settings: Settings;
   statistics: Statistics;
   last_transcript: string | null;
+  previous_transcript: string | null;
   last_raw_transcript: string | null;
+  has_pending_polish: boolean;
   can_retry_polish: boolean;
   builtin_polish_profiles: PolishProfile[];
   last_error: string | null;
@@ -76,5 +78,6 @@ export type Action =
   | 'cancel_recording'
   | 'reset_statistics'
   | 'copy_last_transcript'
+  | 'copy_last_raw_transcript'
   | 'retry_polish'
   | 'quit_app';

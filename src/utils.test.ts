@@ -60,7 +60,7 @@ describe('status and action guards', () => {
   });
 
   it('does not enable actions without an initial snapshot', () => {
-    for (const action of [...configurationActions, 'toggle_recording', 'toggle_speech', 'cancel_recording', 'copy_last_transcript', 'retry_polish'] as Action[]) {
+    for (const action of [...configurationActions, 'toggle_recording', 'toggle_speech', 'cancel_recording', 'copy_last_transcript', 'copy_last_raw_transcript', 'retry_polish'] as Action[]) {
       expect(canRunAction(action, null)).toBe(false);
     }
   });
@@ -89,6 +89,53 @@ describe('status and action guards', () => {
     expect(canRunAction('copy_last_transcript', makeSnapshot({ phase, last_transcript: 'Текст' }))).toBe(false);
   });
 
+  it.each([null, ''])('rejects copying absent or empty raw text (%s) even with a final transcript', (last_raw_transcript) => {
+    expect(canRunAction('copy_last_raw_transcript', makeSnapshot({
+      last_raw_transcript, last_transcript: 'Готовый текст',
+    }))).toBe(false);
+  });
+
+  it.each([null, '', 'Готовый текст'])('allows copying raw text while idle independently of final text (%s), API key or retry', (last_transcript) => {
+    expect(canRunAction('copy_last_raw_transcript', makeSnapshot({
+      last_raw_transcript: '  Исходный текст\n', last_transcript,
+      has_api_key: false, can_retry_polish: false,
+    }))).toBe(true);
+  });
+
+  it.each([...sttPhases, ...ttsPhases])('rejects copying existing raw text during %s', (phase) => {
+    expect(canRunAction('copy_last_raw_transcript', makeSnapshot({
+      phase, last_raw_transcript: 'Исходный текст', last_transcript: 'Готовый текст',
+    }))).toBe(false);
+  });
+
+  it('does not copy the previous final after a new polish failure', () => {
+    const snapshot = makeSnapshot({
+      previous_transcript: 'A', last_transcript: null, last_raw_transcript: 'B',
+      can_retry_polish: true,
+    });
+    expect(snapshot.has_pending_polish).toBe(true);
+    expect(canRunAction('copy_last_transcript', snapshot)).toBe(false);
+    expect(canRunAction('copy_last_raw_transcript', snapshot)).toBe(true);
+    expect(canRunAction('retry_polish', snapshot)).toBe(true);
+    expect(canRunAction('retry_polish', { ...snapshot, has_api_key: false })).toBe(false);
+  });
+
+  it.each([...sttPhases, ...ttsPhases])('does not use pending polish as an action guard during %s', (phase) => {
+    const snapshot = makeSnapshot({
+      phase, previous_transcript: 'A', last_raw_transcript: 'B',
+      has_pending_polish: true, can_retry_polish: false,
+    });
+    expect(canRunAction('retry_polish', snapshot)).toBe(false);
+    expect(canRunAction('copy_last_transcript', snapshot)).toBe(false);
+    expect(canRunAction('copy_last_raw_transcript', snapshot)).toBe(false);
+  });
+
+  it('does not enable retry from pending polish alone even while idle', () => {
+    expect(canRunAction('retry_polish', makeSnapshot({
+      has_pending_polish: true, can_retry_polish: false, last_raw_transcript: 'B',
+    }))).toBe(false);
+  });
+
   it('uses distinct Russian status labels for every phase', () => {
     expect(isBusy('idle')).toBe(false);
     expect(statusText('idle')).toBe('Готово к диктовке');
@@ -97,6 +144,20 @@ describe('status and action guards', () => {
     expect(statusText('polishing')).toBe('Обработка текста');
     expect(statusText('synthesizing')).toBe('Создаём речь');
     expect(statusText('playing')).toBe('Воспроизводим речь');
+  });
+});
+
+describe('snapshot fixtures', () => {
+  it('defaults to no previous result or pending polish', () => {
+    expect(makeSnapshot()).toMatchObject({
+      previous_transcript: null, has_pending_polish: false, can_retry_polish: false,
+    });
+  });
+
+  it('derives pending polish from retry but preserves explicit overrides', () => {
+    expect(makeSnapshot({ can_retry_polish: true }).has_pending_polish).toBe(true);
+    expect(makeSnapshot({ can_retry_polish: true, has_pending_polish: false }).has_pending_polish).toBe(false);
+    expect(makeSnapshot({ can_retry_polish: false, has_pending_polish: true }).has_pending_polish).toBe(true);
   });
 });
 

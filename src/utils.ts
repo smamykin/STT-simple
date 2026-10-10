@@ -100,6 +100,8 @@ export function canRunAction(action: Action, snapshot: Snapshot | null): boolean
       return snapshot.phase === 'idle' && snapshot.has_api_key && snapshot.can_retry_polish;
     case 'copy_last_transcript':
       return snapshot.phase === 'idle' && Boolean(snapshot.last_transcript);
+    case 'copy_last_raw_transcript':
+      return snapshot.phase === 'idle' && Boolean(snapshot.last_raw_transcript);
     default:
       return !isBusy(snapshot.phase);
   }

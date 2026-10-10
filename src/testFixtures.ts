@@ -17,7 +17,9 @@ export function makeSnapshot(overrides: Partial<Snapshot> = {}): Snapshot {
     },
     statistics: { last_recording_seconds: 0, total_recording_seconds: 0, recordings: 0 },
     last_transcript: null,
+    previous_transcript: null,
     last_raw_transcript: null,
+    has_pending_polish: overrides.can_retry_polish === true,
     can_retry_polish: false,
     builtin_polish_profiles: [
       { id: 'polish', name: 'Минимальная правка', mode: 'llm', instruction: 'Минимально исправь текст, сохраняя смысл.', prefix: '', suffix: '' },

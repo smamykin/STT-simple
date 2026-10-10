@@ -16,6 +16,7 @@ export const backend = {
   cancelRecording: () => invoke<void>('cancel_recording'),
   resetStatistics: () => invoke<Snapshot>('reset_statistics'),
   copyLastTranscript: () => invoke<void>('copy_last_transcript'),
+  copyLastRawTranscript: () => invoke<void>('copy_last_raw_transcript'),
   retryPolish: () => invoke<void>('retry_polish'),
   cyclePolishProfile: () => invoke<Snapshot>('cycle_polish_profile'),
   quitApp: () => invoke<void>('quit_app'),

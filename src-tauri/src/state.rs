@@ -33,7 +33,9 @@ pub struct Snapshot {
     pub settings: Settings,
     pub statistics: Statistics,
     pub last_transcript: Option<String>,
+    pub previous_transcript: Option<String>,
     pub last_raw_transcript: Option<String>,
+    pub has_pending_polish: bool,
     pub can_retry_polish: bool,
     pub builtin_polish_profiles: Vec<PolishProfile>,
     pub last_error: Option<String>,
@@ -93,6 +95,7 @@ pub struct Data {
     pub session: Option<Session>,
     pub next_session_id: u64,
     pub last_transcript: Option<String>,
+    pub previous_transcript: Option<String>,
     pub last_raw_transcript: Option<String>,
     pub pending_polish: Option<PolishSettings>,
     pub last_error: Option<String>,
@@ -241,7 +244,9 @@ impl Data {
             settings: self.stored.settings.clone(),
             statistics: self.stored.statistics.clone(),
             last_transcript: self.last_transcript.clone(),
+            previous_transcript: self.previous_transcript.clone(),
             last_raw_transcript: self.last_raw_transcript.clone(),
+            has_pending_polish: self.pending_polish.is_some() && self.last_raw_transcript.is_some(),
             can_retry_polish: self.phase == Phase::Idle
                 && self.pending_polish.is_some()
                 && self.last_raw_transcript.is_some(),
@@ -274,7 +279,9 @@ impl Data {
         polish: PolishSettings,
     ) -> Result<TranscriptProcessing, String> {
         self.last_raw_transcript = Some(raw.clone());
-        self.last_transcript = None;
+        if let Some(previous) = self.last_transcript.take() {
+            self.previous_transcript = Some(previous);
+        }
         self.pending_polish = None;
         if polish.profile_id.is_none() {
             return Ok(TranscriptProcessing::Publish(raw));
@@ -308,6 +315,7 @@ impl Data {
 
     pub fn accept_output(&mut self, text: String) {
         self.last_transcript = Some(text);
+        self.previous_transcript = None;
         self.pending_polish = None;
     }
 
@@ -375,6 +383,7 @@ mod tests {
             polish_hotkey_command: None,
             polish_hotkey_message: None,
             last_transcript: None,
+            previous_transcript: None,
             last_raw_transcript: None,
             pending_polish: None,
             last_error: None,
@@ -544,6 +553,9 @@ mod tests {
     fn all_phases_serialize_only_public_snapshot_fields() {
         use tauri::ipc::{InvokeResponseBody, IpcResponse};
         let mut data = idle_data();
+        data.previous_transcript = Some("A".into());
+        data.last_raw_transcript = Some("B".into());
+        data.pending_polish = Some(selected_polish());
         let (cancel, _) = tokio::sync::watch::channel(false);
         data.tts_session = Some(TtsSession {
             id: 987654321,
@@ -564,6 +576,9 @@ mod tests {
                 panic!("expected JSON");
             };
             assert!(json.contains(&format!("\"phase\":\"{name}\"")));
+            assert!(json.contains("\"previous_transcript\":\"A\""));
+            assert!(json.contains("\"has_pending_polish\":true"));
+            assert!(json.contains(&format!("\"can_retry_polish\":{}", phase == Phase::Idle)));
             for secret in [
                 "tts_session",
                 "987654321",
@@ -625,6 +640,169 @@ mod tests {
     }
 
     #[test]
+    fn previous_transcript_and_pending_polish_survive_failure_tts_and_retry() {
+        let mut data = idle_data();
+        data.recording_started();
+        data.phase = Phase::Transcribing;
+        let (id, _cancellation) = data.begin_processing();
+        let TranscriptProcessing::Publish(text) = data
+            .accept_transcript("A".into(), PolishSettings::default())
+            .unwrap()
+        else {
+            panic!("disabled polish must publish raw text");
+        };
+        let result = data.complete_processing(id, Some(Ok(text))).unwrap();
+        assert_eq!(result.output, Some(Ok("A".into())));
+        data.phase = Phase::Idle;
+        assert_eq!(data.snapshot().last_transcript.as_deref(), Some("A"));
+        assert!(data.snapshot().previous_transcript.is_none());
+
+        data.recording_started();
+        assert_eq!(data.last_transcript.as_deref(), Some("A"));
+        assert!(data.previous_transcript.is_none());
+        data.phase = Phase::Transcribing;
+        let (id, _cancellation) = data.begin_processing();
+        assert_eq!(
+            data.accept_transcript("B".into(), selected_polish())
+                .unwrap(),
+            TranscriptProcessing::Polish
+        );
+        assert!(data.snapshot().last_transcript.is_none());
+        assert_eq!(data.snapshot().previous_transcript.as_deref(), Some("A"));
+        assert!(data.snapshot().has_pending_polish);
+        assert!(!data.snapshot().can_retry_polish);
+        let result = data
+            .complete_processing(id, Some(Err("polish failed".into())))
+            .unwrap();
+        assert!(!result.cancelled);
+        assert_eq!(result.output, Some(Err("polish failed".into())));
+        data.phase = Phase::Idle;
+        data.last_error = Some("polish failed".into());
+        assert!(data.snapshot().can_retry_polish);
+        assert!(data.snapshot().has_pending_polish);
+
+        let (cancel, _tts_cancellation) = tokio::sync::watch::channel(false);
+        data.tts_session = Some(TtsSession {
+            id: 42,
+            cancel,
+            preparation: None,
+            player: None,
+        });
+        data.phase = Phase::Synthesizing;
+        data.last_error = None;
+        let snapshot = data.snapshot();
+        assert!(snapshot.last_transcript.is_none());
+        assert_eq!(snapshot.previous_transcript.as_deref(), Some("A"));
+        assert_eq!(snapshot.last_raw_transcript.as_deref(), Some("B"));
+        assert!(snapshot.has_pending_polish);
+        assert!(!snapshot.can_retry_polish);
+        assert!(data.retry_job().is_err());
+
+        let (player, acknowledgement) = Player::pending_test_proxy();
+        data.tts_session.as_mut().unwrap().player = Some(player);
+        data.phase = Phase::Playing;
+        assert!(data.snapshot().has_pending_polish);
+        assert!(!data.snapshot().can_retry_polish);
+        assert!(data.retry_job().is_err());
+        assert!(!data.complete_tts(42, None));
+        assert!(data.snapshot().has_pending_polish);
+        acknowledgement.send(Some(Ok(()))).unwrap();
+        assert!(data.complete_tts(42, None));
+        assert!(data.snapshot().can_retry_polish);
+        assert!(data.snapshot().has_pending_polish);
+        assert!(data.last_error.is_none());
+
+        assert_eq!(data.begin_retry().unwrap(), ("B".into(), selected_polish()));
+        let (id, _cancellation) = data.begin_processing();
+        let snapshot = data.snapshot();
+        assert!(snapshot.has_pending_polish);
+        assert!(!snapshot.can_retry_polish);
+        assert!(snapshot.last_transcript.is_none());
+        assert_eq!(snapshot.previous_transcript.as_deref(), Some("A"));
+        assert_eq!(snapshot.last_raw_transcript.as_deref(), Some("B"));
+        let result = data
+            .complete_processing(id, Some(Ok("B polished".into())))
+            .unwrap();
+        assert_eq!(result.output, Some(Ok("B polished".into())));
+        data.phase = Phase::Idle;
+        let snapshot = data.snapshot();
+        assert_eq!(snapshot.last_transcript.as_deref(), Some("B polished"));
+        assert_eq!(snapshot.last_raw_transcript.as_deref(), Some("B"));
+        assert!(snapshot.previous_transcript.is_none());
+        assert!(!snapshot.has_pending_polish);
+        assert!(!snapshot.can_retry_polish);
+    }
+
+    #[test]
+    fn previous_transcript_is_retained_across_new_failures_until_success() {
+        let mut data = idle_data();
+        data.accept_output("A".into());
+        for raw in ["B", "C"] {
+            data.recording_started();
+            data.phase = Phase::Transcribing;
+            let (id, _cancellation) = data.begin_processing();
+            data.accept_transcript(raw.into(), selected_polish())
+                .unwrap();
+            let result = data
+                .complete_processing(id, Some(Err("failed".into())))
+                .unwrap();
+            assert_eq!(result.output, Some(Err("failed".into())));
+            data.phase = Phase::Idle;
+            assert!(data.last_transcript.is_none());
+            assert_eq!(data.previous_transcript.as_deref(), Some("A"));
+            assert_eq!(data.last_raw_transcript.as_deref(), Some(raw));
+        }
+        data.recording_started();
+        assert_eq!(data.previous_transcript.as_deref(), Some("A"));
+        assert!(!data.snapshot().has_pending_polish);
+        data.phase = Phase::Transcribing;
+        let (id, _cancellation) = data.begin_processing();
+        let TranscriptProcessing::Publish(text) = data
+            .accept_transcript("D".into(), selected_local())
+            .unwrap()
+        else {
+            panic!("local profile must publish without LLM");
+        };
+        data.complete_processing(id, Some(Ok(text.clone())))
+            .unwrap();
+        data.phase = Phase::Idle;
+        assert!(data.previous_transcript.is_none());
+        assert_eq!(data.last_transcript.as_ref(), Some(&text));
+        data.recording_started();
+        data.phase = Phase::Transcribing;
+        data.accept_transcript("E".into(), selected_polish())
+            .unwrap();
+        assert_eq!(data.previous_transcript, Some(text));
+        assert!(data.last_transcript.is_none());
+    }
+
+    #[test]
+    fn pending_polish_snapshot_requires_job_and_raw_but_not_idle_or_key() {
+        for phase in [
+            Phase::Idle,
+            Phase::Recording,
+            Phase::Transcribing,
+            Phase::Polishing,
+            Phase::Synthesizing,
+            Phase::Playing,
+        ] {
+            for raw in [None, Some(String::new()), Some("raw".into())] {
+                for pending in [None, Some(selected_polish())] {
+                    let mut data = idle_data();
+                    data.phase = phase;
+                    data.has_api_key = false;
+                    data.last_raw_transcript = raw.clone();
+                    data.pending_polish = pending;
+                    let expected = data.pending_polish.is_some() && raw.is_some();
+                    let snapshot = data.snapshot();
+                    assert_eq!(snapshot.has_pending_polish, expected);
+                    assert_eq!(snapshot.can_retry_polish, phase == Phase::Idle && expected);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn cancelling_processing_signals_worker_and_keeps_busy_until_acknowledgement() {
         let mut data = idle_data();
         data.phase = Phase::Transcribing;
@@ -645,8 +823,10 @@ mod tests {
         let mut data = idle_data();
         data.phase = Phase::Transcribing;
         let (id, cancellation) = data.begin_processing();
+        data.accept_output("previous".into());
         data.accept_transcript("исходный текст".into(), selected_polish())
             .unwrap();
+        assert_eq!(data.previous_transcript.as_deref(), Some("previous"));
         data.request_processing_stop();
         assert!(*cancellation.borrow());
         assert!(data.processing_active(id));
@@ -659,6 +839,8 @@ mod tests {
         data.phase = Phase::Idle;
         assert_eq!(data.last_transcript.as_deref(), Some("исходный текст"));
         assert_eq!(data.last_raw_transcript.as_deref(), Some("исходный текст"));
+        assert!(data.previous_transcript.is_none());
+        assert!(!data.snapshot().has_pending_polish);
         assert!(!data.snapshot().can_retry_polish);
     }
 
@@ -864,6 +1046,8 @@ mod tests {
         data.phase = Phase::Idle;
         assert_eq!(data.last_raw_transcript.as_deref(), Some("raw"));
         assert!(data.last_transcript.is_none());
+        assert_eq!(data.snapshot().previous_transcript.as_deref(), Some("old"));
+        assert!(data.snapshot().has_pending_polish);
         assert!(data.snapshot().can_retry_polish);
         assert_eq!(
             data.snapshot().builtin_polish_profiles,
@@ -888,6 +1072,7 @@ mod tests {
             session: None,
             next_session_id: 0,
             last_transcript: None,
+            previous_transcript: None,
             last_raw_transcript: None,
             pending_polish: None,
             last_error: None,
@@ -907,6 +1092,14 @@ mod tests {
             Some("stt-simple --toggle")
         );
         assert!(snapshot.last_transcript.is_none());
+        assert!(snapshot.previous_transcript.is_none());
+        assert!(!snapshot.has_pending_polish);
+        use tauri::ipc::{InvokeResponseBody, IpcResponse};
+        let InvokeResponseBody::Json(json) = snapshot.body().unwrap() else {
+            panic!("expected JSON");
+        };
+        assert!(json.contains("\"previous_transcript\":null"));
+        assert!(json.contains("\"has_pending_polish\":false"));
         assert!(data.ensure_idle().is_ok());
     }
     #[test]
@@ -926,6 +1119,7 @@ mod tests {
             session: None,
             next_session_id: 0,
             last_transcript: None,
+            previous_transcript: None,
             last_raw_transcript: None,
             pending_polish: None,
             last_error: None,
