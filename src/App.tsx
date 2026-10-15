@@ -52,6 +52,7 @@ export default function App() {
     shortcut: '',
     model: DEFAULT_MODEL,
     tts_shortcut: '',
+    cancel_shortcut: 'Control+Shift+Escape',
     polish_shortcut: /Linux|X11/i.test(navigator.userAgent) ? 'Super+Backslash' : 'Control+Super+Backslash',
     tts_model: DEFAULT_TTS_MODEL,
     tts_voice: DEFAULT_TTS_VOICE,
@@ -265,6 +266,12 @@ export default function App() {
         </div>
       </section>
 
+      {snapshot && <p className="shortcut-hint">
+        Отмена текущей операции: <kbd>{formatShortcutHint(snapshot.settings.cancel_shortcut, mac)}</kbd>
+        <span>{systemHotkey ? ' · на Wayland назначается вручную'
+          : snapshot.cancel_hotkey_available ? ' · зарегистрировано' : ' · не удалось зарегистрировать'}</span>
+      </p>}
+
       <TranscriptResult snapshot={snapshot} connected={connected} pending={pending} runAction={runAction}
         autoPaste={snapshot?.settings.auto_paste ?? false} mac={mac} linux={linux} />
 
@@ -463,6 +470,17 @@ export default function App() {
                       : ' После сохранения приложение зарегистрирует сочетание в системе.'}</p>
                 </div>
               </section>
+              <div className="field">
+                <label htmlFor="cancel-shortcut">Сочетание клавиш отмены</label>
+                <input id="cancel-shortcut" value={draft.cancel_shortcut} maxLength={128} spellCheck={false}
+                  placeholder="Control+Shift+Escape" autoComplete="off" aria-describedby="cancel-shortcut-help"
+                  aria-invalid={Boolean(settingsError)}
+                  onChange={(event) => updateDraft('cancel_shortcut', event.target.value)} />
+                <p className="help" id="cancel-shortcut-help">Отменяет запись, распознавание, обработку текста или озвучивание.
+                  При отмене обработки исходный текст копируется без автовставки. В готовом состоянии ничего не делает.
+                  {systemHotkey && ' На Wayland назначьте команду --cancel вручную.'}</p>
+              </div>
+
               <div id="polish-settings" className="settings-subsection">
               <div className="field">
                 <label htmlFor="polish-shortcut">Сочетание клавиш переключения обработки</label>
@@ -534,11 +552,14 @@ export default function App() {
 
       {snapshot && (systemHotkey || !snapshot.hotkey_available || snapshot.hotkey_message
         || !snapshot.tts_hotkey_available || snapshot.tts_hotkey_message
-        || !snapshot.polish_hotkey_available || snapshot.polish_hotkey_message) && (
+        || !snapshot.polish_hotkey_available || snapshot.polish_hotkey_message
+        || !snapshot.cancel_hotkey_available || snapshot.cancel_hotkey_message) && (
         <aside className="card hotkey-card" aria-labelledby="hotkey-heading">
           <h2 id="hotkey-heading">Системное сочетание клавиш</h2>
           {snapshot.hotkey_message && <p className="hotkey-message"><strong>Диктовка:</strong> {snapshot.hotkey_message}</p>}
           {snapshot.tts_hotkey_message && <p className="hotkey-message"><strong>Озвучивание:</strong> {snapshot.tts_hotkey_message}</p>}
+          {snapshot.cancel_hotkey_message && <p className="hotkey-message"><strong>Отмена:</strong> {snapshot.cancel_hotkey_message}</p>}
+          {!systemHotkey && !snapshot.cancel_hotkey_available && <p className="help">Отмена сочетанием недоступна. Используйте трей или сохраните другое сочетание отмены.</p>}
           {snapshot.polish_hotkey_message && <p className="hotkey-message"><strong>Переключение обработки:</strong> {snapshot.polish_hotkey_message}</p>}
           {systemHotkey && <>
             <p>На Ubuntu GNOME/Wayland нажмите «Сохранить настройки», чтобы применить выбранные
@@ -550,6 +571,11 @@ export default function App() {
               Она сохраняется после выхода и может запускать приложение. После перемещения бинарника
               сохраните настройки снова, чтобы обновить путь. В других Wayland-окружениях назначьте
               показанную команду вручную. Проверка не гарантирует отсутствие перехвата клавиш расширениями GNOME.</p>
+            <div className="wayland-tts">
+              <h3>Отмена на Wayland</h3>
+              <p>Назначьте сочетание <kbd>{formatShortcutHint(snapshot.settings.cancel_shortcut, mac)}</kbd> вручную на команду:</p>
+              <code className="command">{snapshot.cancel_hotkey_command ?? 'stt-simple --cancel'}</code>
+            </div>
             <div className="wayland-tts">
               <h3>Озвучивание на Wayland</h3>
               <p>Назначьте сочетание <kbd>{formatShortcutHint(snapshot.settings.tts_shortcut, mac)}</kbd> вручную на команду:</p>

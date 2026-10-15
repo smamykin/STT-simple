@@ -20,6 +20,8 @@ pub fn load_data(path: &Path) -> Result<StoredData, String> {
     let has_tts_shortcut = settings.is_some_and(|settings| settings.contains_key("tts_shortcut"));
     let has_polish_shortcut =
         settings.is_some_and(|settings| settings.contains_key("polish_shortcut"));
+    let has_cancel_shortcut =
+        settings.is_some_and(|settings| settings.contains_key("cancel_shortcut"));
     let mut data: StoredData = serde_json::from_value(value)
         .map_err(|_| "Файл настроек повреждён. Восстановите его из резервной копии или удалите, чтобы сбросить настройки.".to_owned())?;
     if !has_tts_shortcut
@@ -40,6 +42,26 @@ pub fn load_data(path: &Path) -> Result<StoredData, String> {
                 && !shortcuts_are_equivalent(candidate, &data.settings.tts_shortcut)
         })
         .expect("three cycle candidates for two existing shortcuts")
+        .into();
+    }
+    if !has_cancel_shortcut {
+        data.settings.cancel_shortcut = [
+            crate::DEFAULT_CANCEL_SHORTCUT,
+            "Control+Super+7",
+            "Control+Super+8",
+            "Control+Super+9",
+        ]
+        .into_iter()
+        .find(|candidate| {
+            [
+                &data.settings.shortcut,
+                &data.settings.tts_shortcut,
+                &data.settings.polish_shortcut,
+            ]
+            .iter()
+            .all(|shortcut| !shortcuts_are_equivalent(candidate, shortcut))
+        })
+        .expect("four cancellation candidates for three existing shortcuts")
         .into();
     }
     validate_data(&data)?;
@@ -294,6 +316,30 @@ mod tests {
             assert_eq!(restored.settings, Settings::default());
             assert_eq!(restored.statistics.total_recording_seconds, 0.0);
         }
+    }
+
+    #[test]
+    fn cancel_migration_avoids_existing_shortcuts_and_preserves_explicit_values() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("settings.json");
+        let mut json = serde_json::json!({"settings": {
+            "shortcut": "shift+ctrl+esc", "tts_shortcut": "Super+Control+7",
+            "polish_shortcut": "Control+Super+8"
+        }});
+        fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+        let data = load_data(&path).unwrap();
+        assert_eq!(data.settings.cancel_shortcut, "Control+Super+9");
+        save_data(&path, &data).unwrap();
+        assert_eq!(load_data(&path).unwrap().settings, data.settings);
+        json["settings"]["cancel_shortcut"] = "Control+Shift+Escape".into();
+        fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+        assert!(load_data(&path).err().unwrap().contains("отмены"));
+        json["settings"]["cancel_shortcut"] = "Control+Alt+Escape".into();
+        fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+        assert_eq!(
+            load_data(&path).unwrap().settings.cancel_shortcut,
+            "Control+Alt+Escape"
+        );
     }
 
     #[test]

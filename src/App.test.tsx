@@ -83,6 +83,31 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe('universal cancellation shortcut', () => {
+  it('edits and saves a normalized cancellation shortcut', async () => {
+    await mountSettings();
+    const input = screen.getByLabelText('Сочетание клавиш отмены');
+    expect(input).toHaveProperty('value', 'Control+Shift+Escape');
+    backend.saveSettings.mockImplementation(async (settings: Settings) => makeSnapshot({ settings }));
+    fireEvent.change(input, { target: { value: ' Control + Alt + Escape ' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Сохранить настройки' }));
+    await waitFor(() => expect(backend.saveSettings).toHaveBeenCalledWith(expect.objectContaining({ cancel_shortcut: 'Control+Alt+Escape' })));
+  });
+
+  it('shows cancellation registration failure without marking dictation unavailable', async () => {
+    await mount(makeSnapshot({ cancel_hotkey_available: false, cancel_hotkey_message: 'Сочетание отмены занято.' }));
+    expect(screen.getByText('Сочетание отмены занято.')).toBeTruthy();
+    expect(screen.getByText(/Отмена сочетанием недоступна/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Начать запись' })).toHaveProperty('disabled', false);
+  });
+
+  it('offers a manual Wayland cancellation command', async () => {
+    await mountSettings(makeSnapshot({ hotkey_mode: 'system', cancel_hotkey_available: false, cancel_hotkey_command: 'stt-simple --cancel' }));
+    expect(screen.getByRole('heading', { name: 'Отмена на Wayland' })).toBeTruthy();
+    expect(screen.getByText('stt-simple --cancel')).toBeTruthy();
+  });
+});
+
 describe('polishing interface', () => {
   const refreshModels = () => screen.getByRole('button', { name: 'Обновить модели OpenAI' });
 
@@ -856,7 +881,7 @@ describe('Russian dictation interface', () => {
     expect(screen.queryByRole('heading', { name: 'Системное сочетание клавиш' })).toBeNull();
     expect(screen.queryByText(/настроено в GNOME/)).toBeNull();
     openHome();
-    expect(screen.getAllByText(/зарегистрировано/)).toHaveLength(2);
+    expect(screen.getAllByText(/зарегистрировано/)).toHaveLength(3);
   });
 
   it('keeps the saved GNOME status and settings when applying another shortcut fails', async () => {

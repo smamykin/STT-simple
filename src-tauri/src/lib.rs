@@ -45,6 +45,7 @@ enum StartupAction {
     ToggleStt,
     ToggleTts,
     CyclePolish,
+    Cancel,
 }
 
 fn startup_action(args: impl IntoIterator<Item = impl AsRef<str>>) -> StartupAction {
@@ -52,7 +53,9 @@ fn startup_action(args: impl IntoIterator<Item = impl AsRef<str>>) -> StartupAct
         .into_iter()
         .map(|arg| arg.as_ref().to_owned())
         .collect();
-    if args.iter().any(|arg| arg == "--toggle-tts") {
+    if args.iter().any(|arg| arg == "--cancel") {
+        StartupAction::Cancel
+    } else if args.iter().any(|arg| arg == "--toggle-tts") {
         StartupAction::ToggleTts
     } else if args.iter().any(|arg| arg == "--cycle-polish") {
         StartupAction::CyclePolish
@@ -129,6 +132,7 @@ async fn save_settings(app: AppHandle, mut settings: Settings) -> Result<Snapsho
     settings.shortcut = settings.shortcut.trim().to_owned();
     settings.tts_shortcut = settings.tts_shortcut.trim().to_owned();
     settings.polish_shortcut = settings.polish_shortcut.trim().to_owned();
+    settings.cancel_shortcut = settings.cancel_shortcut.trim().to_owned();
     settings.tts_model = settings.tts_model.trim().to_owned();
     settings.tts_voice = settings.tts_voice.trim().to_owned();
     settings.validate()?;
@@ -965,10 +969,23 @@ async fn cancel(
     // Signal the current processing generation immediately. Waiting for the control lock here
     // would let a ready response commit before an already requested cancellation.
     if expected_session.is_none() {
-        let data = runtime.data.lock().expect("application state poisoned");
-        if matches!(data.phase, Phase::Transcribing | Phase::Polishing) {
-            data.request_processing_stop();
-            return Ok(());
+        let tts_id = {
+            let data = runtime.data.lock().expect("application state poisoned");
+            if data.phase == Phase::Idle {
+                return Ok(());
+            }
+            if matches!(data.phase, Phase::Transcribing | Phase::Polishing) {
+                data.request_processing_stop();
+                return Ok(());
+            }
+            if matches!(data.phase, Phase::Synthesizing | Phase::Playing) {
+                data.tts_session.as_ref().map(|session| session.id)
+            } else {
+                None
+            }
+        };
+        if let Some(id) = tts_id {
+            return stop_speech_generation(app, Some(id), None).await;
         }
     }
 
@@ -1144,6 +1161,8 @@ fn shortcut_action(
         Some(StartupAction::ToggleTts)
     } else if shortcuts::validate(&settings.polish_shortcut).ok().as_ref() == Some(shortcut) {
         Some(StartupAction::CyclePolish)
+    } else if shortcuts::validate(&settings.cancel_shortcut).ok().as_ref() == Some(shortcut) {
+        Some(StartupAction::Cancel)
     } else {
         None
     }
@@ -1153,6 +1172,7 @@ fn dispatch_request(app: &AppHandle, action: StartupAction) {
     match action {
         StartupAction::ToggleStt => spawn_shortcut_toggle(app.clone()),
         StartupAction::ToggleTts => spawn_speech(app.clone()),
+        StartupAction::Cancel => spawn_cancel(app.clone()),
         StartupAction::CyclePolish => {
             let handle = app.clone();
             tauri::async_runtime::spawn(async move {
@@ -1231,6 +1251,7 @@ pub fn run() {
             app.manage(Runtime {
                 data: Mutex::new(Data { processing: None, tts_session: None, next_tts_session_id: 0,
                     tts_hotkey_available: false, tts_hotkey_command: None, tts_hotkey_message: None,
+                    cancel_hotkey_available: false, cancel_hotkey_command: None, cancel_hotkey_message: None,
                     polish_hotkey_available: false, polish_hotkey_command: if wayland { Some(shortcuts::wayland_polish_command()) } else { None }, polish_hotkey_message: None,
                     stored, phase: Phase::Idle, session: None, next_session_id: 0,
                     last_transcript: None, previous_transcript: None, last_raw_transcript: None, pending_polish: None, last_error, has_api_key,
@@ -1282,6 +1303,23 @@ pub fn run() {
 mod tests {
     use super::*;
 
+    #[test]
+    fn cancellation_shortcut_and_cli_route_to_cancel_not_toggle() {
+        let settings = Settings::default();
+        assert_eq!(
+            shortcut_action(&settings, &shortcuts::validate("ctrl+shift+esc").unwrap()),
+            Some(StartupAction::Cancel)
+        );
+        assert_eq!(
+            startup_action(["stt-simple", "--cancel"]),
+            StartupAction::Cancel
+        );
+        assert_eq!(
+            startup_action(["stt-simple", "--toggle-tts", "--cancel"]),
+            StartupAction::Cancel
+        );
+    }
+
     fn models_runtime(phase: Phase) -> Runtime {
         Runtime {
             data: Mutex::new(Data {
@@ -1291,6 +1329,9 @@ mod tests {
                 tts_hotkey_available: false,
                 tts_hotkey_command: None,
                 tts_hotkey_message: None,
+                cancel_hotkey_available: false,
+                cancel_hotkey_command: None,
+                cancel_hotkey_message: None,
                 polish_hotkey_available: false,
                 polish_hotkey_command: None,
                 polish_hotkey_message: None,
