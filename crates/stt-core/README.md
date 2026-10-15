@@ -9,7 +9,7 @@ via this crate's OpenAI client, not by local text rewriting.
 
 ## Public API
 
-- `Settings { shortcut, model, tts_shortcut, tts_model, tts_voice, input_device, auto_paste, paste_shortcut, polish }`
+- `Settings { shortcut, model, tts_shortcut, polish_shortcut, cancel_shortcut, tts_model, tts_voice, input_device, auto_paste, paste_shortcut, polish }`
   and `Settings::validate()` (including polish validation). Defaults: `Super+R`
   on Linux (`Control+Super+R` on macOS), `gpt-transcribe` (also exported as
   `DEFAULT_MODEL`), `Control+Super+A` for TTS on every platform,
@@ -18,11 +18,15 @@ via this crate's OpenAI client, not by local text rewriting.
   polishing off. Omitted fields in existing persisted settings are defaulted.
   If an older file lacks `tts_shortcut` and its STT shortcut conflicts with that
   default, loading migrates its TTS shortcut to `Control+Super+4`; an explicitly
-  persisted conflict remains invalid. Both shortcuts must contain 1–128
+  persisted conflict remains invalid. Cancellation defaults to `Control+Shift+Escape`
+  (`DEFAULT_CANCEL_SHORTCUT`) and must differ from STT, TTS, and profile cycling.
+  Missing cancellation bindings migrate to the first free value among that default,
+  `Control+Super+7`, `Control+Super+8`, and `Control+Super+9`; explicit values are preserved.
+  All shortcuts must contain 1–128
   characters. Trimmed-identical values always conflict. Otherwise conflict
   detection treats modifier order, ASCII case, and the aliases `Control`/`Ctrl`,
   `Alt`/`Option`, `Super`/`Meta`/`Command`/`Cmd`, and `Shift` as equivalent
-  without rewriting persisted shortcuts. Malformed shortcut syntax and
+  without rewriting persisted shortcuts. `Esc` and `Escape` are equivalent. Malformed shortcut syntax and
   duplicate equivalent modifiers have no canonical identity, but
   trimmed-identical malformed values still conflict. TTS model IDs use the same
   format rules as transcription IDs; voice IDs use the same ASCII format and

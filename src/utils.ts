@@ -131,7 +131,7 @@ function shortcutIdentity(shortcut: string): string | null {
   const modifiers = parts.slice(0, -1).map((modifier) => MODIFIER_ALIASES[modifier]);
   if (parts.some((part) => !part) || !key || MODIFIERS.has(key)
     || modifiers.length === 0 || modifiers.some((modifier) => !modifier)) return null;
-  return `${[...modifiers].sort().join('+')}+${key}`;
+  return `${[...modifiers].sort().join('+')}+${key === 'esc' ? 'escape' : key}`;
 }
 
 export function formatShortcutHint(shortcut: string, mac: boolean): string {
@@ -156,6 +156,7 @@ export function normalizeSettings(settings: Settings): Settings {
     model: settings.model.trim(),
     tts_shortcut: normalizeShortcut(settings.tts_shortcut),
     polish_shortcut: normalizeShortcut(settings.polish_shortcut),
+    cancel_shortcut: normalizeShortcut(settings.cancel_shortcut),
     tts_model: settings.tts_model.trim(),
     tts_voice: settings.tts_voice.trim(),
     input_device: settings.input_device,
@@ -173,7 +174,7 @@ export function normalizeSettings(settings: Settings): Settings {
 }
 
 
-function validateShortcut(shortcut: string, purpose: 'распознавания' | 'озвучивания' | 'обработки'): string | null {
+function validateShortcut(shortcut: string, purpose: 'распознавания' | 'озвучивания' | 'обработки' | 'отмены'): string | null {
   const value = shortcut.trim();
   if (!value || value.length > 128 || /[\u0000-\u001f\u007f]/.test(value)) {
     return `Укажите сочетание клавиш ${purpose}, например Super+R или Control+Super+R.`;
@@ -247,6 +248,13 @@ export function validateSettings(settings: Settings, builtinIds: readonly string
   if (shortcutIdentity(settings.shortcut) === shortcutIdentity(settings.tts_shortcut)) {
     return 'Сочетания клавиш распознавания и озвучивания не должны совпадать.';
   }
+  const cancelShortcutError = validateShortcut(settings.cancel_shortcut, 'отмены');
+  if (cancelShortcutError) return cancelShortcutError;
+  const cancelIdentity = shortcutIdentity(settings.cancel_shortcut);
+  if ([settings.shortcut, settings.tts_shortcut, settings.polish_shortcut]
+    .some((shortcut) => shortcutIdentity(shortcut) === cancelIdentity)) {
+    return 'Сочетание клавиш отмены не должно совпадать с другими сочетаниями.';
+  }
   // The backend is authoritative for platform-specific shortcut parsing.
   return null;
 }
@@ -256,6 +264,7 @@ export function settingsEqual(left: Settings, right: Settings): boolean {
     && left.model === right.model
     && left.tts_shortcut === right.tts_shortcut
     && left.polish_shortcut === right.polish_shortcut
+    && left.cancel_shortcut === right.cancel_shortcut
     && left.tts_model === right.tts_model
     && left.tts_voice === right.tts_voice
     && left.input_device === right.input_device

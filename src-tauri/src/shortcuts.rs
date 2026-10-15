@@ -37,7 +37,16 @@ fn verify_system(shortcut: &str) -> Result<(), String> {
     }
 }
 
-pub fn validate_all(settings: &Settings) -> Result<[Shortcut; 3], String> {
+pub fn validate_all(settings: &Settings) -> Result<[Shortcut; 4], String> {
+    let primary = validate_primary(settings)?;
+    let cancel = validate(&settings.cancel_shortcut)?;
+    if primary.contains(&cancel) {
+        return Err("Сочетание клавиш отмены не должно совпадать с другими сочетаниями.".into());
+    }
+    Ok([primary[0], primary[1], primary[2], cancel])
+}
+
+fn validate_primary(settings: &Settings) -> Result<[Shortcut; 3], String> {
     let shortcuts = [
         validate(&settings.shortcut)?,
         validate(&settings.tts_shortcut)?,
@@ -66,6 +75,13 @@ pub fn wayland_polish_command() -> String {
         .unwrap_or_else(|| "stt-simple --cycle-polish".into())
 }
 
+pub fn wayland_cancel_command() -> String {
+    wayland_command()
+        .strip_suffix(" --toggle")
+        .map(|exe| format!("{exe} --cancel"))
+        .unwrap_or_else(|| "stt-simple --cancel".into())
+}
+
 fn verify_system_polish(shortcut: &str) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
@@ -87,6 +103,10 @@ pub fn update_tts_status(app: &AppHandle) {
     };
     let mut data = runtime.data.lock().expect("application state poisoned");
     if clipboard::is_wayland() {
+        data.cancel_hotkey_available = false;
+        data.cancel_hotkey_command = Some(wayland_cancel_command());
+        data.cancel_hotkey_message =
+            Some("Назначьте команду отмены вручную в системных сочетаниях клавиш.".into());
         data.tts_hotkey_available = false;
         data.tts_hotkey_command = Some(wayland_tts_command());
         data.tts_hotkey_message = Some("Назначьте команду озвучивания вручную в системных сочетаниях клавиш. TTS на Linux не проверен.".into());
@@ -94,6 +114,9 @@ pub fn update_tts_status(app: &AppHandle) {
         data.polish_hotkey_command = Some(wayland_polish_command());
         data.polish_hotkey_message = polish_status.err();
     } else {
+        data.cancel_hotkey_available = true;
+        data.cancel_hotkey_command = None;
+        data.cancel_hotkey_message = None;
         data.tts_hotkey_available = true;
         data.tts_hotkey_command = None;
         data.tts_hotkey_message = None;
@@ -103,7 +126,7 @@ pub fn update_tts_status(app: &AppHandle) {
     }
 }
 
-pub fn retain_pressed(pressed: &mut HashSet<Shortcut>, shortcuts: &[Shortcut; 3]) {
+pub fn retain_pressed(pressed: &mut HashSet<Shortcut>, shortcuts: &[Shortcut]) {
     pressed.retain(|shortcut| shortcuts.contains(shortcut));
 }
 
@@ -181,25 +204,36 @@ fn replace_native(
     Ok(())
 }
 
+fn initialize_native(manager: &impl Registrations, settings: &Settings) -> [Result<(), String>; 4] {
+    let primary =
+        validate_primary(settings).and_then(|shortcuts| replace_native(manager, &[], &shortcuts));
+    let cancel = validate(&settings.cancel_shortcut).and_then(|cancel| {
+        let conflicts = [&settings.shortcut, &settings.tts_shortcut, &settings.polish_shortcut]
+            .iter().filter_map(|value| validate(value).ok()).any(|shortcut| shortcut == cancel);
+        if conflicts {
+            return Err("Сочетание клавиш отмены не должно совпадать с другими сочетаниями.".into());
+        }
+        replace_native(manager, &[], &[cancel])
+            .map_err(|_| "Не удалось зарегистрировать сочетание отмены: оно недоступно или занято. Выберите другое в настройках; отмена через трей доступна.".into())
+    });
+    [primary.clone(), primary.clone(), primary, cancel]
+}
+
 pub fn initialize(app: &AppHandle) {
     let runtime = app.state::<Runtime>();
     let settings = runtime.snapshot().settings;
     update_tts_status(app);
     let results = if clipboard::is_wayland() {
-        [verify_system(&settings.shortcut), Ok(()), Ok(())]
+        [verify_system(&settings.shortcut), Ok(()), Ok(()), Ok(())]
     } else {
-        match validate_all(&settings) {
-            Ok(shortcuts) => match replace_native(&NativeRegistrations(app), &[], &shortcuts) {
-                Ok(()) => [Ok(()), Ok(()), Ok(())],
-                Err(error) => [Err(error.clone()), Err(error.clone()), Err(error)],
-            },
-            Err(error) => [Err(error.clone()), Err(error.clone()), Err(error)],
-        }
+        initialize_native(&NativeRegistrations(app), &settings)
     };
     let mut data = runtime.data.lock().expect("application state poisoned");
     data.hotkey_available = results[0].is_ok();
     data.hotkey_message = results[0].as_ref().err().cloned();
     if !clipboard::is_wayland() {
+        data.cancel_hotkey_available = results[3].is_ok();
+        data.cancel_hotkey_message = results[3].as_ref().err().cloned();
         data.tts_hotkey_available = results[1].is_ok();
         data.tts_hotkey_message = results[1].as_ref().err().cloned();
         data.polish_hotkey_available = results[2].is_ok();
@@ -231,10 +265,15 @@ pub async fn replace(app: &AppHandle, old: &Settings, new: &Settings) -> Result<
         #[cfg(not(target_os = "linux"))]
         return Err("Автоматическая настройка GNOME поддерживается только на Linux.".into());
     }
-    let old_shortcuts: Vec<_> = [&old.shortcut, &old.tts_shortcut, &old.polish_shortcut]
-        .into_iter()
-        .filter_map(|value| validate(value).ok())
-        .collect();
+    let old_shortcuts: Vec<_> = [
+        &old.shortcut,
+        &old.tts_shortcut,
+        &old.polish_shortcut,
+        &old.cancel_shortcut,
+    ]
+    .into_iter()
+    .filter_map(|value| validate(value).ok())
+    .collect();
     replace_native(&NativeRegistrations(app), &old_shortcuts, &new_shortcuts)
 }
 
@@ -287,6 +326,82 @@ mod tests {
             validate(b).unwrap(),
             validate(c).unwrap(),
         ]
+    }
+
+    #[test]
+    fn cancellation_startup_failure_does_not_disable_other_shortcuts() {
+        let settings = Settings::default();
+        let all = validate_all(&settings).unwrap();
+        let manager = FakeRegistrations::default();
+        manager.failures.borrow_mut().push((true, all[3]));
+        let results = initialize_native(&manager, &settings);
+        assert!(results[..3].iter().all(Result::is_ok));
+        assert!(results[3].as_ref().unwrap_err().contains("отмены"));
+        assert!(all[..3].iter().all(|shortcut| manager.contains(*shortcut)));
+        assert!(!manager.contains(all[3]));
+    }
+
+    #[test]
+    fn cancellation_still_registers_when_a_primary_shortcut_is_unavailable() {
+        let settings = Settings::default();
+        let all = validate_all(&settings).unwrap();
+        let manager = FakeRegistrations::default();
+        manager.failures.borrow_mut().push((true, all[1]));
+        let results = initialize_native(&manager, &settings);
+        assert!(results[..3].iter().all(Result::is_err));
+        assert!(results[3].is_ok());
+        assert_eq!(*manager.held.borrow(), HashSet::from([all[3]]));
+    }
+
+    #[test]
+    fn invalid_cancellation_binding_does_not_affect_primary_registration() {
+        for value in ["Not+A+Shortcut", "Control+Super+A"] {
+            let settings = Settings {
+                cancel_shortcut: value.into(),
+                ..Settings::default()
+            };
+            let manager = FakeRegistrations::default();
+            let results = initialize_native(&manager, &settings);
+            assert!(results[..3].iter().all(Result::is_ok));
+            assert!(results[3].is_err());
+            assert_eq!(manager.held.borrow().len(), 3);
+        }
+    }
+
+    #[test]
+    fn cancellation_is_parsed_validated_and_replaced_transactionally() {
+        let settings = Settings::default();
+        let old = validate_all(&settings).unwrap();
+        assert_eq!(old[3], validate("ctrl+shift+esc").unwrap());
+        for conflict in [
+            &settings.shortcut,
+            &settings.tts_shortcut,
+            &settings.polish_shortcut,
+        ] {
+            assert!(validate_all(&Settings {
+                cancel_shortcut: conflict.clone(),
+                ..settings.clone()
+            })
+            .is_err());
+        }
+        let mut new = old;
+        new[3] = validate("Control+Alt+Escape").unwrap();
+        let manager = FakeRegistrations::default();
+        initialize_native(&manager, &settings)
+            .into_iter()
+            .for_each(|result| result.unwrap());
+        manager.failures.borrow_mut().push((true, new[3]));
+        assert!(replace_native(&manager, &old, &new).is_err());
+        assert_eq!(*manager.held.borrow(), HashSet::from(old));
+        replace_native(&manager, &old, &new).unwrap();
+        assert_eq!(*manager.held.borrow(), HashSet::from(new));
+        let mut pressed = HashSet::from(old);
+        retain_pressed(&mut pressed, &old);
+        assert!(!pressed.insert(old[3]));
+        pressed.remove(&old[3]);
+        assert!(pressed.insert(old[3]));
+        retain_pressed(&mut pressed, &new);
+        assert!(!pressed.contains(&old[3]));
     }
 
     #[test]
@@ -450,5 +565,6 @@ mod tests {
         assert!(wayland_command().ends_with(" --toggle"));
         assert!(wayland_tts_command().ends_with(" --toggle-tts"));
         assert!(wayland_polish_command().ends_with(" --cycle-polish"));
+        assert!(wayland_cancel_command().ends_with(" --cancel"));
     }
 }

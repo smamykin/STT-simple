@@ -24,6 +24,7 @@ pub const DEFAULT_POLISH_SHORTCUT: &str = if cfg!(target_os = "linux") {
 } else {
     "Control+Super+Backslash"
 };
+pub const DEFAULT_CANCEL_SHORTCUT: &str = "Control+Shift+Escape";
 pub const MAX_TTS_INPUT_CHARS: usize = 4096;
 
 #[derive(Clone, Copy, Default, Serialize, Deserialize, Debug, PartialEq, Eq)]
@@ -41,6 +42,7 @@ pub struct Settings {
     pub model: String,
     pub tts_shortcut: String,
     pub polish_shortcut: String,
+    pub cancel_shortcut: String,
     pub tts_model: String,
     pub tts_voice: String,
     pub input_device: Option<String>,
@@ -61,6 +63,7 @@ impl Default for Settings {
             model: DEFAULT_MODEL.to_owned(),
             tts_shortcut: "Control+Super+A".to_owned(),
             polish_shortcut: DEFAULT_POLISH_SHORTCUT.to_owned(),
+            cancel_shortcut: DEFAULT_CANCEL_SHORTCUT.to_owned(),
             tts_model: DEFAULT_TTS_MODEL.to_owned(),
             tts_voice: DEFAULT_TTS_VOICE.to_owned(),
             input_device: None,
@@ -90,6 +93,18 @@ impl Settings {
             &self.polish_shortcut,
             "Укажите сочетание клавиш обработки длиной от 1 до 128 символов.",
         )?;
+        validate_shortcut(
+            &self.cancel_shortcut,
+            "Укажите сочетание клавиш отмены длиной от 1 до 128 символов.",
+        )?;
+        if [&self.shortcut, &self.tts_shortcut, &self.polish_shortcut]
+            .iter()
+            .any(|shortcut| shortcuts_are_equivalent(shortcut, &self.cancel_shortcut))
+        {
+            return Err(
+                "Сочетание клавиш отмены не должно совпадать с другими сочетаниями.".into(),
+            );
+        }
         if shortcuts_are_equivalent(&self.shortcut, &self.tts_shortcut) {
             return Err("Сочетания клавиш распознавания и озвучивания не должны совпадать.".into());
         }
@@ -139,7 +154,11 @@ fn shortcut_identity(shortcut: &str) -> Option<(u8, String)> {
             if parts.peek().is_some() || !part.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
                 return None;
             }
-            key = Some(part.to_ascii_lowercase());
+            key = Some(if part.eq_ignore_ascii_case("esc") {
+                "escape".to_owned()
+            } else {
+                part.to_ascii_lowercase()
+            });
         }
     }
 
@@ -244,6 +263,30 @@ pub struct StoredData {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancel_shortcut_defaults_roundtrips_and_rejects_conflicts() {
+        let defaults: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(defaults.cancel_shortcut, "Control+Shift+Escape");
+        assert_eq!(
+            serde_json::from_value::<Settings>(serde_json::to_value(&defaults).unwrap()).unwrap(),
+            defaults
+        );
+        for field in ["shortcut", "tts_shortcut", "polish_shortcut"] {
+            let mut json = serde_json::to_value(&defaults).unwrap();
+            json[field] = "shift+ctrl+esc".into();
+            let settings: Settings = serde_json::from_value(json).unwrap();
+            assert!(settings.validate().unwrap_err().contains("отмены"));
+        }
+        for value in ["".to_owned(), "x".repeat(129)] {
+            assert!(Settings {
+                cancel_shortcut: value,
+                ..defaults.clone()
+            }
+            .validate()
+            .is_err());
+        }
+    }
 
     #[test]
     fn paste_shortcut_defaults_for_old_settings_and_roundtrips() {

@@ -24,6 +24,7 @@ export interface Settings {
   model: string;
   tts_shortcut: string;
   polish_shortcut: string;
+  cancel_shortcut: string;
   tts_model: string;
   tts_voice: string;
   input_device: string | null;
@@ -60,6 +61,9 @@ export interface Snapshot {
   polish_hotkey_available: boolean;
   polish_hotkey_command: string | null;
   polish_hotkey_message: string | null;
+  cancel_hotkey_available: boolean;
+  cancel_hotkey_command: string | null;
+  cancel_hotkey_message: string | null;
   recording_seconds: number;
 }
 

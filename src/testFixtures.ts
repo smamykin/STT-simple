@@ -8,6 +8,7 @@ export function makeSnapshot(overrides: Partial<Snapshot> = {}): Snapshot {
       model: 'gpt-4o-mini-transcribe',
       tts_shortcut: 'Control+Super+A',
       polish_shortcut: 'Control+Super+Backslash',
+      cancel_shortcut: 'Control+Shift+Escape',
       tts_model: 'gpt-4o-mini-tts',
       tts_voice: 'marin',
       input_device: null,
@@ -38,6 +39,9 @@ export function makeSnapshot(overrides: Partial<Snapshot> = {}): Snapshot {
     polish_hotkey_available: true,
     polish_hotkey_command: null,
     polish_hotkey_message: null,
+    cancel_hotkey_available: true,
+    cancel_hotkey_command: null,
+    cancel_hotkey_message: null,
     recording_seconds: 0,
     ...overrides,
   };

@@ -17,6 +17,20 @@ const configurationActions: Action[] = [
 const sttPhases = ['recording', 'transcribing', 'polishing'] as const;
 const ttsPhases = ['synthesizing', 'playing'] as const;
 
+describe('cancel shortcut', () => {
+  it('normalizes and compares the persisted cancellation binding', () => {
+    const changed = { ...settings, cancel_shortcut: ' Control + Shift + Esc ' };
+    expect(normalizeSettings(changed).cancel_shortcut).toBe('Control+Shift+Esc');
+    expect(settingsEqual(settings, changed)).toBe(false);
+    expect(validateSettings(settings)).toBeNull();
+    expect(validateSettings({ ...settings, cancel_shortcut: '' })).toContain('отмены');
+  });
+
+  it.each(['shortcut', 'tts_shortcut', 'polish_shortcut'] as const)('rejects Escape aliases conflicting with %s', (field) => {
+    expect(validateSettings({ ...settings, [field]: 'shift+ctrl+esc' })).toContain('отмены');
+  });
+});
+
 describe('formatDuration', () => {
   it.each([
     { seconds: 0, expected: '00:00' },
