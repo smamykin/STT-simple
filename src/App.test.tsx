@@ -108,6 +108,104 @@ describe('universal cancellation shortcut', () => {
   });
 });
 
+describe('profile transcription dictionary', () => {
+  it('saves an independent Off dictionary and restores its terms after disabling and remounting', async () => {
+    let snapshot = makeSnapshot();
+    snapshot.settings.model = 'gpt-transcribe';
+    const app = await mountSettings(snapshot);
+    backend.saveSettings.mockImplementation(async (settings: Settings) => {
+      snapshot = { ...snapshot, settings };
+      return snapshot;
+    });
+    expect(screen.getByLabelText('Профиль обработки текста')).toHaveProperty('value', '');
+    expect(screen.queryByLabelText('Инструкция профиля')).toBeNull();
+    fireEvent.change(screen.getByLabelText('Термины для распознавания'), { target: { value: 'off-service\ncustomerId' } });
+    fireEvent.click(screen.getByLabelText('Использовать словарь'));
+    fireEvent.change(screen.getByLabelText('Профиль обработки текста'), { target: { value: 'developer' } });
+    expect(screen.getByLabelText('Термины для распознавания')).toHaveProperty('value', '');
+    expect(screen.getByLabelText('Использовать словарь')).toHaveProperty('checked', false);
+    fireEvent.change(screen.getByLabelText('Термины для распознавания'), { target: { value: 'developer-service' } });
+    fireEvent.change(screen.getByLabelText('Профиль обработки текста'), { target: { value: '' } });
+    expect(screen.getByLabelText('Термины для распознавания')).toHaveProperty('value', 'off-service\ncustomerId');
+    expect(screen.getByLabelText('Использовать словарь')).toHaveProperty('checked', true);
+    fireEvent.click(screen.getByRole('button', { name: 'Сохранить настройки' }));
+    await waitFor(() => expect(backend.saveSettings).toHaveBeenCalledOnce());
+    expect(snapshot.settings.polish.profile_id).toBeNull();
+    expect(snapshot.settings.polish.transcription_dictionaries).toEqual({
+      '': { enabled: true, terms: ['off-service', 'customerId'] },
+      developer: { enabled: false, terms: ['developer-service'] },
+    });
+    await waitFor(() => expect(screen.getByLabelText('Использовать словарь').matches(':disabled')).toBe(false));
+    fireEvent.click(screen.getByLabelText('Использовать словарь'));
+    vi.spyOn(performance, 'now').mockReturnValue(performance.now() + 1000);
+    fireEvent.click(screen.getByRole('button', { name: 'Сохранить настройки' }));
+    await waitFor(() => expect(backend.saveSettings).toHaveBeenCalledTimes(2));
+    app.unmount();
+    await mountSettings(structuredClone(snapshot));
+    expect(screen.getByLabelText('Профиль обработки текста')).toHaveProperty('value', '');
+    expect(screen.getByLabelText('Использовать словарь')).toHaveProperty('checked', false);
+    expect(screen.getByLabelText('Термины для распознавания')).toHaveProperty('value', 'off-service\ncustomerId');
+  });
+  it('edits independent builtin dictionaries and keeps terms when disabled and saved', async () => {
+    const snapshot = makeSnapshot();
+    snapshot.settings.model = 'gpt-transcribe';
+    await mountSettings(snapshot);
+    backend.saveSettings.mockImplementation(async (settings: Settings) => ({ ...snapshot, settings }));
+    expect(screen.getByLabelText('Термины для распознавания')).toHaveProperty('value', '');
+    fireEvent.change(screen.getByLabelText('Профиль обработки текста'), { target: { value: 'developer' } });
+    expect(screen.getByLabelText('Использовать словарь')).toHaveProperty('checked', false);
+    fireEvent.change(screen.getByLabelText('Термины для распознавания'), { target: { value: ' orders-pay \ncustomerId\n\norders-pay' } });
+    fireEvent.click(screen.getByLabelText('Использовать словарь'));
+    fireEvent.change(screen.getByLabelText('Профиль обработки текста'), { target: { value: 'markdown' } });
+    expect(screen.getByLabelText('Термины для распознавания')).toHaveProperty('value', '');
+    expect(screen.getByLabelText('Использовать словарь')).toHaveProperty('checked', false);
+    fireEvent.change(screen.getByLabelText('Термины для распознавания'), { target: { value: 'another-service' } });
+    fireEvent.change(screen.getByLabelText('Профиль обработки текста'), { target: { value: 'developer' } });
+    expect(screen.getByLabelText('Использовать словарь')).toHaveProperty('checked', true);
+    expect(screen.getByLabelText('Термины для распознавания')).toHaveProperty('value', ' orders-pay \ncustomerId\n\norders-pay');
+    fireEvent.click(screen.getByLabelText('Использовать словарь'));
+    expect(backend.saveSettings).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Сохранить настройки' }));
+    await waitFor(() => expect(backend.saveSettings).toHaveBeenCalledOnce());
+    expect(backend.saveSettings.mock.calls[0]?.[0].polish.transcription_dictionaries).toEqual({
+      developer: { enabled: false, terms: ['orders-pay', 'customerId'] },
+      markdown: { enabled: false, terms: ['another-service'] },
+    });
+    await waitFor(() => expect(screen.getByLabelText('Термины для распознавания')).toHaveProperty('value', 'orders-pay\ncustomerId'));
+    expect(screen.getByLabelText('Инструкция профиля')).toHaveProperty('readOnly', true);
+  });
+
+  it('copies a dictionary on duplication and removes only the deleted profile dictionary', async () => {
+    const snapshot = makeSnapshot();
+    snapshot.settings.polish.profile_id = 'developer';
+    snapshot.settings.polish.transcription_dictionaries = { developer: { enabled: true, terms: ['orders-pay'] } };
+    await mountSettings(snapshot);
+    backend.saveSettings.mockImplementation(async (settings: Settings) => ({ ...snapshot, settings }));
+    fireEvent.click(screen.getByRole('button', { name: 'Дублировать профиль' }));
+    expect(screen.getByLabelText('Термины для распознавания')).toHaveProperty('value', 'orders-pay');
+    expect(screen.getByLabelText('Использовать словарь')).toHaveProperty('checked', true);
+    fireEvent.change(screen.getByLabelText('Термины для распознавания'), { target: { value: 'different-service' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Удалить профиль' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Сохранить настройки' }));
+    await waitFor(() => expect(backend.saveSettings).toHaveBeenCalledOnce());
+    expect(backend.saveSettings.mock.calls[0]?.[0].polish.transcription_dictionaries).toEqual({
+      developer: { enabled: true, terms: ['orders-pay'] },
+    });
+  });
+
+  it('warns about unsupported STT models without clearing the dictionary and locks editing while busy', async () => {
+    const snapshot = makeSnapshot();
+    snapshot.settings.polish.profile_id = 'developer';
+    snapshot.settings.polish.transcription_dictionaries = { developer: { enabled: true, terms: ['orders-pay'] } };
+    await mountSettings(snapshot);
+    expect(screen.getByText(/Словарь передаётся только модели gpt-transcribe/)).toBeTruthy();
+    expect(screen.getByLabelText('Термины для распознавания')).toHaveProperty('value', 'orders-pay');
+    emit({ ...snapshot, phase: 'recording' });
+    expect(screen.getByLabelText('Использовать словарь').matches(':disabled')).toBe(true);
+    expect(screen.getByLabelText('Термины для распознавания').matches(':disabled')).toBe(true);
+  });
+});
+
 describe('polishing interface', () => {
   const refreshModels = () => screen.getByRole('button', { name: 'Обновить модели OpenAI' });
 
@@ -340,7 +438,7 @@ describe('polishing interface', () => {
     expect(screen.getByLabelText('Профиль обработки текста')).toHaveProperty('value', '');
     expect(snapshot.settings.polish.custom_profiles).toHaveLength(1);
     await save();
-    expect(snapshot.settings.polish).toEqual({ profile_id: null, model: 'gpt-6-luna', effort: null, custom_profiles: [], favorite_profile_ids: [] });
+    expect(snapshot.settings.polish).toEqual({ profile_id: null, model: 'gpt-6-luna', effort: null, custom_profiles: [], favorite_profile_ids: [], transcription_dictionaries: {} });
     expect(backend.saveSettings).toHaveBeenCalledTimes(3);
   });
 

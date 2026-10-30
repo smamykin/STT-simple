@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import { backend } from './backend';
-import type { PolishProfile, PolishSettings } from './types';
+import type { PolishProfile, PolishSettings, TranscriptionDictionary } from './types';
 import { MAX_CUSTOM_POLISH_PROFILES, POLISH_EFFORTS, POLISH_MODELS, POLISH_MODEL_EFFORTS, createPolishProfileId } from './utils';
 
-export function PolishSettingsFields({ value, builtins, hasApiKey, onChange }: {
+export function PolishSettingsFields({ value, builtins, hasApiKey, transcriptionModel, onChange }: {
   value: PolishSettings;
   builtins: PolishProfile[];
   hasApiKey: boolean;
+  transcriptionModel: string;
   onChange: (value: PolishSettings) => void;
 }) {
   const [manualModel, setManualModel] = useState(false);
@@ -39,6 +40,8 @@ export function PolishSettingsFields({ value, builtins, hasApiKey, onChange }: {
   const profiles = [...builtins, ...value.custom_profiles];
   const selected = profiles.find((profile) => profile.id === value.profile_id);
   const custom = value.custom_profiles.find((profile) => profile.id === value.profile_id);
+  const dictionaryId = value.profile_id ?? '';
+  const dictionary = value.transcription_dictionaries[dictionaryId] ?? { enabled: false, terms: [] };
   const customModel = manualModel || (!POLISH_MODELS.includes(value.model) && !catalog?.includes(value.model));
   const knownEfforts = Object.hasOwn(POLISH_MODEL_EFFORTS, value.model) ? POLISH_MODEL_EFFORTS[value.model] : undefined;
   const efforts = knownEfforts ?? POLISH_EFFORTS;
@@ -55,7 +58,11 @@ export function PolishSettingsFields({ value, builtins, hasApiKey, onChange }: {
       prefix: source?.prefix ?? '',
       suffix: source?.suffix ?? '',
     };
-    onChange({ ...value, profile_id: profile.id, custom_profiles: [...value.custom_profiles, profile] });
+    const sourceDictionary = source && value.transcription_dictionaries[source.id];
+    onChange({ ...value, profile_id: profile.id, custom_profiles: [...value.custom_profiles, profile],
+      transcription_dictionaries: sourceDictionary
+        ? { ...value.transcription_dictionaries, [profile.id]: { ...sourceDictionary, terms: [...sourceDictionary.terms] } }
+        : value.transcription_dictionaries });
   }
 
   function editProfile(field: 'name' | 'instruction' | 'prefix' | 'suffix', text: string) {
@@ -66,6 +73,22 @@ export function PolishSettingsFields({ value, builtins, hasApiKey, onChange }: {
   function editProfileMode(mode: PolishProfile['mode']) {
     onChange({ ...value, custom_profiles: value.custom_profiles.map((profile) =>
       profile.id === custom?.id ? { ...profile, mode } : profile) });
+  }
+
+  function editDictionary(change: Partial<TranscriptionDictionary>) {
+    onChange({ ...value, transcription_dictionaries: {
+      ...value.transcription_dictionaries, [dictionaryId]: { ...dictionary, ...change },
+    } });
+  }
+
+  function deleteProfile() {
+    if (!custom) return;
+    const dictionaries = { ...value.transcription_dictionaries };
+    delete dictionaries[custom.id];
+    onChange({ ...value, profile_id: null,
+      custom_profiles: value.custom_profiles.filter((profile) => profile.id !== custom.id),
+      favorite_profile_ids: value.favorite_profile_ids.filter((id) => id !== custom.id),
+      transcription_dictionaries: dictionaries });
   }
 
   function toggleFavorite(id: string, checked: boolean) {
@@ -95,7 +118,7 @@ export function PolishSettingsFields({ value, builtins, hasApiKey, onChange }: {
             {value.custom_profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name || 'Без названия'}</option>)}
           </optgroup>
         </select>
-        <p className="help">Встроенные профили и их инструкции заданы приложением и доступны только для чтения.</p>
+        <p className="help">Инструкции встроенных профилей заданы приложением и доступны только для чтения. Словарь можно настроить для любого профиля.</p>
       </div>
       <fieldset className="field favorite-profiles" aria-describedby="favorite-profiles-help">
         <legend>Избранные профили для переключения</legend>
@@ -138,14 +161,30 @@ export function PolishSettingsFields({ value, builtins, hasApiKey, onChange }: {
           {custom.mode === 'local' && <p className="help">Локальный профиль не отправляет текст на дополнительную обработку OpenAI.</p>}
         </>}
       </div>}
+      <fieldset className="field" aria-describedby="transcription-dictionary-help">
+        <legend>{value.profile_id === null ? 'Словарь для распознавания речи без обработки (Off)' : 'Словарь профиля для распознавания речи'}</legend>
+        <label className="checkbox-label">
+          <input type="checkbox" checked={dictionary.enabled}
+            onChange={(event) => editDictionary({ enabled: event.target.checked })} />
+          <span>Использовать словарь</span>
+        </label>
+        <label htmlFor="transcription-terms">Термины для распознавания</label>
+        <textarea id="transcription-terms" className="transcript" rows={5} spellCheck={false}
+          value={dictionary.terms.join('\n')} aria-describedby="transcription-dictionary-help"
+          placeholder={'orders-pay\ncustomerId'}
+          onChange={(event) => editDictionary({ terms: event.target.value.split('\n') })} />
+        <p className="help" id="transcription-dictionary-help">По одному слову или словосочетанию на строку: до 256 терминов, до 128 символов каждый.
+          Выключение сохраняет список. Термины передаются только в speech-to-text через keywords, не в обработку текста или TTS.
+          Настройки применяются после сохранения к новым записям с этим профилем. У режима «Выключено» (Off) свой независимый словарь — без постобработки текста.</p>
+        {transcriptionModel !== 'gpt-transcribe' && <p className="help" role="alert">Словарь передаётся только модели gpt-transcribe.
+          Для выбранной STT-модели он не будет отправлен; список останется сохранённым.</p>}
+      </fieldset>
       <div className="field form-actions">
         <button type="button" className="button button-secondary button-small" disabled={atProfileLimit} onClick={() => addProfile()}>Создать профиль</button>
         {selected && <button type="button" className="button button-secondary button-small" disabled={atProfileLimit}
           onClick={() => addProfile(selected)}>Дублировать профиль</button>}
         {custom && <button type="button" className="button button-danger-quiet button-small"
-          onClick={() => onChange({ ...value, profile_id: null,
-            custom_profiles: value.custom_profiles.filter((profile) => profile.id !== custom.id),
-            favorite_profile_ids: value.favorite_profile_ids.filter((id) => id !== custom.id) })}>Удалить профиль</button>}
+          onClick={deleteProfile}>Удалить профиль</button>}
       </div>
       <div className="field">
         <label htmlFor="polish-model">Модель обработки текста</label>

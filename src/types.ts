@@ -11,12 +11,18 @@ export interface PolishProfile {
   suffix: string;
 }
 
+export interface TranscriptionDictionary {
+  enabled: boolean;
+  terms: string[];
+}
+
 export interface PolishSettings {
   profile_id: string | null;
   model: string;
   effort: string | null;
   custom_profiles: PolishProfile[];
   favorite_profile_ids: string[];
+  transcription_dictionaries: Record<string, TranscriptionDictionary>;
 }
 
 export interface Settings {

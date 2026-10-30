@@ -59,7 +59,7 @@ export default function App() {
     input_device: null,
     auto_paste: false,
     paste_shortcut: 'ctrl_v',
-    polish: { profile_id: null, model: 'gpt-6-luna', effort: null, custom_profiles: [], favorite_profile_ids: [] },
+    polish: { profile_id: null, model: 'gpt-6-luna', effort: null, custom_profiles: [], favorite_profile_ids: [], transcription_dictionaries: {} },
   });
   const [manualModel, setManualModel] = useState(false);
   const [manualTtsModel, setManualTtsModel] = useState(false);
@@ -492,7 +492,7 @@ export default function App() {
                   Переключает «Выключено» и избранные профили в порядке списка.</p>
               </div>
               <PolishSettingsFields key={`${keyGeneration}:${snapshot?.has_api_key}:${connected}`}
-                value={draft.polish} builtins={snapshot?.builtin_polish_profiles ?? []}
+                value={draft.polish} builtins={snapshot?.builtin_polish_profiles ?? []} transcriptionModel={draft.model}
                 hasApiKey={snapshot?.has_api_key ?? false}
                 onChange={(value) => updateDraft('polish', value)} />
               </div>

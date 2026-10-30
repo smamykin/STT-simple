@@ -14,7 +14,7 @@ export function makeSnapshot(overrides: Partial<Snapshot> = {}): Snapshot {
       input_device: null,
       auto_paste: false,
       paste_shortcut: 'ctrl_v',
-      polish: { profile_id: null, model: 'gpt-6-luna', effort: null, custom_profiles: [], favorite_profile_ids: [] },
+      polish: { profile_id: null, model: 'gpt-6-luna', effort: null, custom_profiles: [], favorite_profile_ids: [], transcription_dictionaries: {} },
     },
     statistics: { last_recording_seconds: 0, total_recording_seconds: 0, recordings: 0 },
     last_transcript: null,
