@@ -69,7 +69,8 @@ via this crate's OpenAI client, not by local text rewriting.
   `native_samples.len() as f64 / native_sample_rate as f64` before resampling.
   Recordings over 600 seconds and uploads over 25 MiB are rejected.
 - `OpenAiClient::new()` and async
-  `transcribe(&self, api_key: &str, model: &str, audio: Vec<u8>)`, plus
+  `transcribe(&self, api_key: &str, model: &str, audio: Vec<u8>)`,
+  `transcribe_with_terms(&self, api_key: &str, model: &str, audio: Vec<u8>, terms: &[String])`, plus
   `synthesize(&self, api_key: &str, model: &str, voice: &str, input: &str)`.
   Synthesis sends JSON to `https://api.openai.com/v1/audio/speech` with
   `model`, `voice`, original (untrimmed) `input`, and `response_format="wav"`.
@@ -89,8 +90,12 @@ via this crate's OpenAI client, not by local text rewriting.
   The returned `text` is only trimmed at its boundaries: transcription itself
   performs no translation, polish, prompts, model-list request, or additional
   model calls. Optional polishing and explicit model discovery are separate API
-  operations; future model compatibility is left to OpenAI. Transcription sends
-  audio and the bearer key directly to OpenAI; synthesis sends input text and
+  operations; future model compatibility is left to OpenAI.
+  `transcribe_with_terms` adds repeated multipart `keywords[]` fields only for the
+  exact model ID `gpt-transcribe`, as documented by the reference above. Empty
+  lists and other model IDs omit keywords; no prompt fallback is used.
+  `transcribe` remains equivalent to an empty list. Transcription sends
+  audio, any enabled supported keywords, and the bearer key directly to OpenAI; synthesis sends input text and
   the bearer key directly to OpenAI. Both require internet access and an API key. Russian errors do not echo response bodies, keys,
   audio, TTS input, or transcripts. Only `error.code == "insufficient_quota"` selects the
   quota-specific HTTP 429 message; other 429 responses use rate-limit guidance.
@@ -108,6 +113,25 @@ via this crate's OpenAI client, not by local text rewriting.
   the newest entry. An empty list is valid; listing does not imply endpoint support.
   The desktop `list_openai_models` command loads credentials only in Rust after an
   idle check under the control mutex, releasing it before HTTP; it mutates no state.
+
+## Profile transcription dictionaries
+
+`PolishSettings.transcription_dictionaries` is a `BTreeMap<String, TranscriptionDictionary>`
+keyed by built-in or custom profile ID, with the empty string key reserved for
+Off (`profile_id: None`). Empty profile IDs remain invalid for actual profiles,
+selections and favorites. `TranscriptionDictionary { enabled: bool,
+terms: Vec<String> }` defaults to disabled with no terms; old settings default to
+an empty map. `PolishSettings::transcription_terms() -> &[String]` returns terms
+only for the selected, enabled dictionary, including the independent Off
+dictionary when no profile is selected. Missing or disabled dictionaries return
+an empty slice without erasing stored terms. Settings validation rejects
+unknown profile IDs, more than 256 terms per dictionary, blank terms, terms over
+128 Unicode characters, and control characters, even when the dictionary is disabled.
+
+The desktop captures these settings at recording start and passes terms only to
+STT. Dictionary content is not included in Responses API or TTS payloads and does
+not trigger text replacement. Dictionaries are persisted as settings, including
+those for immutable built-in profiles; built-in instructions remain unchanged.
 
 ## Optional transcript polishing
 

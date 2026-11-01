@@ -620,6 +620,7 @@ mod tests {
                 ..Default::default()
             }],
             favorite_profile_ids: Vec::new(),
+            transcription_dictionaries: Default::default(),
         }
     }
 

@@ -166,6 +166,9 @@ export function normalizeSettings(settings: Settings): Settings {
       ...settings.polish,
       model: settings.polish.model.trim(),
       favorite_profile_ids: [...settings.polish.favorite_profile_ids],
+      transcription_dictionaries: Object.fromEntries(Object.entries(settings.polish.transcription_dictionaries).map(([id, dictionary]) => [
+        id, { ...dictionary, terms: [...new Set(dictionary.terms.map((term) => term.trim()).filter(Boolean))] },
+      ])),
       custom_profiles: settings.polish.custom_profiles.map((profile) => ({
         ...profile, name: profile.name.trim(), instruction: profile.instruction.trim(),
       })),
@@ -221,6 +224,13 @@ export function validateSettings(settings: Settings, builtinIds: readonly string
   if (polish.profile_id !== null && !ids.has(polish.profile_id)) {
     return 'Выберите существующий профиль обработки текста или выключите обработку.';
   }
+  for (const [id, dictionary] of Object.entries(polish.transcription_dictionaries)) {
+    if (id !== '' && !ids.has(id)) return 'Профиль словаря распознавания не найден.';
+    if (dictionary.terms.length > 256) return 'Словарь профиля должен содержать не более 256 терминов.';
+    if (dictionary.terms.some((term) => !term.trim() || [...term].length > 128 || /[\u0000-\u001f\u007f-\u009f]/.test(term))) {
+      return 'Термин словаря должен содержать от 1 до 128 символов без переносов строк и управляющих символов.';
+    }
+  }
   const favorites = new Set<string>();
   for (const id of polish.favorite_profile_ids) {
     if (!ids.has(id)) return 'Избранный профиль обработки не найден.';
@@ -275,6 +285,13 @@ export function settingsEqual(left: Settings, right: Settings): boolean {
     && left.polish.effort === right.polish.effort
     && left.polish.favorite_profile_ids.length === right.polish.favorite_profile_ids.length
     && left.polish.favorite_profile_ids.every((id, index) => id === right.polish.favorite_profile_ids[index])
+    && Object.keys(left.polish.transcription_dictionaries).length === Object.keys(right.polish.transcription_dictionaries).length
+    && Object.entries(left.polish.transcription_dictionaries).every(([id, dictionary]) => {
+      const other = right.polish.transcription_dictionaries[id];
+      return other !== undefined && dictionary.enabled === other.enabled
+        && dictionary.terms.length === other.terms.length
+        && dictionary.terms.every((term, index) => term === other.terms[index]);
+    })
     && left.polish.custom_profiles.length === right.polish.custom_profiles.length
     && left.polish.custom_profiles.every((profile, index) => {
       const other = right.polish.custom_profiles[index];

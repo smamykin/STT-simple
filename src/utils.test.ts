@@ -273,6 +273,54 @@ describe('settings validation', () => {
   });
 });
 
+describe('transcription dictionary settings', () => {
+  const withDictionary: Settings = { ...settings, polish: { ...settings.polish,
+    transcription_dictionaries: { developer: { enabled: false, terms: [' orders-pay ', '', 'customerId', 'orders-pay'] } },
+  } };
+
+  it('normalizes terms without mutating or clearing a disabled dictionary', () => {
+    const normalized = normalizeSettings(withDictionary);
+    expect(normalized.polish.transcription_dictionaries).toEqual({ developer: { enabled: false, terms: ['orders-pay', 'customerId'] } });
+    expect(withDictionary.polish.transcription_dictionaries.developer?.terms).toHaveLength(4);
+    expect(validateSettings(normalized)).toBeNull();
+    expect(settingsEqual(normalized, structuredClone(normalized))).toBe(true);
+    expect(settingsEqual(settings, normalized)).toBe(false);
+    for (const dictionary of [
+      { enabled: true, terms: ['orders-pay', 'customerId'] },
+      { enabled: false, terms: ['customerId', 'orders-pay'] },
+      { enabled: false, terms: ['orders-pay'] },
+    ]) {
+      expect(settingsEqual(normalized, { ...normalized, polish: { ...normalized.polish,
+        transcription_dictionaries: { developer: dictionary },
+      } })).toBe(false);
+    }
+  });
+
+  it('accepts the independent Off dictionary without treating its key as a profile ID', () => {
+    const off: Settings = { ...settings, polish: { ...settings.polish,
+      transcription_dictionaries: { '': { enabled: true, terms: ['off-service'] } },
+    } };
+    expect(validateSettings(off)).toBeNull();
+    expect(normalizeSettings(off).polish.transcription_dictionaries['']).toEqual({ enabled: true, terms: ['off-service'] });
+    expect(validateSettings({ ...off, polish: { ...off.polish, profile_id: '' } })).not.toBeNull();
+    expect(validateSettings({ ...off, polish: { ...off.polish, favorite_profile_ids: [''] } })).not.toBeNull();
+    expect(validateSettings({ ...off, polish: { ...off.polish,
+      transcription_dictionaries: { '': { enabled: false, terms: ['x'.repeat(129)] } },
+    } })).not.toBeNull();
+  });
+
+  it('validates saved dictionaries even when disabled or another profile is active', () => {
+    for (const terms of [[''], [' '], ['two\nlines'], ['x'.repeat(129)], Array<string>(257).fill('term')]) {
+      expect(validateSettings({ ...settings, polish: { ...settings.polish,
+        transcription_dictionaries: { developer: { enabled: false, terms } },
+      } })).toMatch(/[Сс]ловар/);
+    }
+    expect(validateSettings({ ...settings, polish: { ...settings.polish,
+      transcription_dictionaries: { missing: { enabled: false, terms: [] } },
+    } })).toContain('не найден');
+  });
+});
+
 describe('polishing settings and retry guards', () => {
   const profile = { id: 'custom-example', name: 'Профиль', mode: 'llm' as const, instruction: 'Инструкция', prefix: '', suffix: '' };
   const withProfile: Settings = { ...settings, polish: { ...settings.polish, profile_id: profile.id, custom_profiles: [profile] } };
@@ -280,7 +328,7 @@ describe('polishing settings and retry guards', () => {
   it('normalizes model, profile name and instruction without mutating the input', () => {
     const input = { ...withProfile, polish: { ...withProfile.polish, model: ' gpt-5 ', custom_profiles: [{ ...profile, name: ' Имя ', instruction: ' Первая\n  вторая ' }] } };
     const normalized = normalizeSettings(input);
-    expect(normalized.polish).toEqual({ profile_id: profile.id, model: 'gpt-5', effort: null, custom_profiles: [{ ...profile, name: 'Имя', instruction: 'Первая\n  вторая' }], favorite_profile_ids: [] });
+    expect(normalized.polish).toEqual({ profile_id: profile.id, model: 'gpt-5', effort: null, custom_profiles: [{ ...profile, name: 'Имя', instruction: 'Первая\n  вторая' }], favorite_profile_ids: [], transcription_dictionaries: {} });
     expect(input.polish.model).toBe(' gpt-5 ');
     expect(input.polish.custom_profiles[0]?.name).toBe(' Имя ');
   });

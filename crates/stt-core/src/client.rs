@@ -238,6 +238,17 @@ impl OpenAiClient {
         model: &str,
         audio: Vec<u8>,
     ) -> Result<String, String> {
+        self.transcribe_with_terms(api_key, model, audio, &[]).await
+    }
+
+    /// Keywords are supported only by gpt-transcribe; other model IDs omit them.
+    pub async fn transcribe_with_terms(
+        &self,
+        api_key: &str,
+        model: &str,
+        audio: Vec<u8>,
+        terms: &[String],
+    ) -> Result<String, String> {
         validate_model(model)?;
         let api_key = api_key.trim();
         if api_key.is_empty() {
@@ -262,6 +273,11 @@ impl OpenAiClient {
             .part("file", part)
             .text("model", model.to_owned())
             .text("response_format", "json");
+        if model == "gpt-transcribe" {
+            for term in terms {
+                form = form.text("keywords[]", term.clone());
+            }
+        }
         if model == "gpt-4o-transcribe-diarize" || model.starts_with("gpt-4o-transcribe-diarize-") {
             // Required by the diarization model for recordings longer than 30 seconds.
             form = form.text("chunking_strategy", "auto");
@@ -1101,6 +1117,76 @@ mod tests {
             .await
             .unwrap_err()
             .contains("не найден"));
+    }
+
+    #[tokio::test]
+    async fn transcription_terms_use_keywords_only_for_gpt_transcribe() {
+        let terms = vec![
+            "orders-pay".into(),
+            "customerId".into(),
+            "название сервиса".into(),
+        ];
+        for model in [
+            "gpt-transcribe",
+            "gpt-4o-transcribe",
+            "gpt-4o-mini-transcribe",
+            "whisper-1",
+            "gpt-4o-transcribe-diarize",
+            "gpt-4o-transcribe-diarize-2025-12-15",
+            "custom-stt",
+        ] {
+            let server = MockServer::start(200, r#"{"text":"recognized"}"#);
+            assert_eq!(
+                server
+                    .client()
+                    .transcribe_with_terms(SECRET, model, PRIVATE_AUDIO.to_vec(), &terms)
+                    .await
+                    .unwrap(),
+                "recognized"
+            );
+            let request = String::from_utf8(server.finish()).unwrap();
+            if model == "gpt-transcribe" {
+                assert_eq!(request.matches("name=\"keywords[]\"").count(), 3);
+                for term in &terms {
+                    assert!(request.contains(&format!("name=\"keywords[]\"\r\n\r\n{term}\r\n")));
+                }
+            } else {
+                assert!(!request.contains("keywords"));
+                assert!(!request.contains("orders-pay"));
+            }
+            assert!(!request.contains("name=\"prompt\""));
+        }
+        let server = MockServer::start(200, r#"{"text":"recognized"}"#);
+        server
+            .client()
+            .transcribe_with_terms(SECRET, "gpt-transcribe", PRIVATE_AUDIO.to_vec(), &[])
+            .await
+            .unwrap();
+        assert!(!String::from_utf8(server.finish())
+            .unwrap()
+            .contains("keywords"));
+    }
+
+    #[tokio::test]
+    async fn dictionary_is_not_sent_to_polishing() {
+        let server = MockServer::start(200, &completed_output().to_string());
+        let mut settings = polish_settings();
+        settings.transcription_dictionaries.insert(
+            "polish".into(),
+            crate::TranscriptionDictionary {
+                enabled: true,
+                terms: vec!["private-service-name".into()],
+            },
+        );
+        server
+            .client()
+            .polish(SECRET, &settings, "raw transcript")
+            .await
+            .unwrap();
+        let request = String::from_utf8(server.finish()).unwrap();
+        assert!(!request.contains("private-service-name"));
+        assert!(!request.contains("transcription_dictionaries"));
+        assert!(!request.contains("keywords"));
     }
 
     #[tokio::test]

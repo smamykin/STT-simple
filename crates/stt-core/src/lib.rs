@@ -9,7 +9,9 @@ mod polish;
 pub use audio::encode_wav;
 pub use client::{OpenAiClient, OpenAiModel};
 pub use persistence::{load_data, save_data, SaveOutcome};
-pub use polish::{builtin_polish_profiles, PolishMode, PolishProfile, PolishSettings};
+pub use polish::{
+    builtin_polish_profiles, PolishMode, PolishProfile, PolishSettings, TranscriptionDictionary,
+};
 
 use serde::{Deserialize, Serialize};
 

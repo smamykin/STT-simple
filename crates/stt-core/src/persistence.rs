@@ -210,6 +210,42 @@ mod tests {
     }
 
     #[test]
+    fn off_dictionary_persists_without_enabling_postprocessing() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("settings.json");
+        let mut data = StoredData::default();
+        data.settings.polish.transcription_dictionaries.insert(
+            String::new(),
+            crate::TranscriptionDictionary {
+                enabled: true,
+                terms: vec!["off-service".into()],
+            },
+        );
+        save_data(&path, &data).unwrap();
+        let mut restored = load_data(&path).unwrap();
+        assert_eq!(restored.settings, data.settings);
+        assert_eq!(restored.settings.polish.selected_profile().unwrap(), None);
+        assert_eq!(
+            restored.settings.polish.transcription_terms(),
+            ["off-service"]
+        );
+        restored
+            .settings
+            .polish
+            .transcription_dictionaries
+            .get_mut("")
+            .unwrap()
+            .enabled = false;
+        save_data(&path, &restored).unwrap();
+        let disabled = load_data(&path).unwrap();
+        assert!(disabled.settings.polish.transcription_terms().is_empty());
+        assert_eq!(
+            disabled.settings.polish.transcription_dictionaries[""].terms,
+            ["off-service"]
+        );
+    }
+
+    #[test]
     fn polish_migration_roundtrip_and_invalid_saves_preserve_disk() {
         let directory = TestDirectory::new();
         let path = directory.0.join("settings.json");
@@ -235,6 +271,22 @@ mod tests {
                 ..Default::default()
             }],
             favorite_profile_ids: vec!["my-profile".into()],
+            transcription_dictionaries: std::collections::BTreeMap::from([
+                (
+                    "my-profile".into(),
+                    crate::TranscriptionDictionary {
+                        enabled: false,
+                        terms: vec!["orders-pay".into(), "customerId".into()],
+                    },
+                ),
+                (
+                    "developer".into(),
+                    crate::TranscriptionDictionary {
+                        enabled: true,
+                        terms: vec!["название сервиса".into()],
+                    },
+                ),
+            ]),
         };
         save_data(&path, &data).unwrap();
         assert_eq!(load_data(&path).unwrap().settings, data.settings);

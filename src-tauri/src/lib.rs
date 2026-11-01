@@ -428,7 +428,17 @@ async fn toggle(
             .await;
             let recognized = cancellable(&mut cancellation, async {
                 match prepared {
-                    Ok(wav) => runtime.client.transcribe(&api_key, &model, wav).await,
+                    Ok(wav) => {
+                        runtime
+                            .client
+                            .transcribe_with_terms(
+                                &api_key,
+                                &model,
+                                wav,
+                                polish.transcription_terms(),
+                            )
+                            .await
+                    }
                     Err(error) => Err(error),
                 }
             })
